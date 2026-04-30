@@ -1,0 +1,27 @@
+# ===========================================================================
+# requirements.txt — LSTM Autoencoder Log Anomaly Detector
+# ===========================================================================
+#
+# Install into your conda environment:
+#   pip install -r requirements.txt
+#
+# PyTorch is managed via conda (not pip) to get the correct CUDA build.
+# Create the base environment once on OSC with:
+#   conda create -n log_anomaly python=3.10 \
+#       pytorch torchvision pytorch-cuda=11.8 \
+#       -c pytorch -c nvidia
+#   conda activate log_anomaly
+#   pip install -r requirements.txt
+# ===========================================================================
+ 
+# Evaluation metrics
+scikit-learn>=1.3.0
+ 
+# Plotting (ROC curve, score distribution)
+matplotlib>=3.7.0
+ 
+# Numerical operations (data loading from .npy files)
+numpy>=1.24.0
+ 
+# Training visualisation (optional — train.py skips gracefully if missing)
+tensorboard>=2.13.0
