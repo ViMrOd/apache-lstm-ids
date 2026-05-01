@@ -194,6 +194,7 @@ def save_checkpoint(model, optimizer, epoch, val_loss, path):
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "val_loss": val_loss,
+            "config": config,
         },
         path,
     )
@@ -207,7 +208,7 @@ def load_checkpoint(path, model, optimizer=None):
     Returns the epoch and val_loss stored in the checkpoint so the caller
     knows where training left off.
     """
-    checkpoint = torch.load(path, map_location="cpu")
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
     if optimizer is not None:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])

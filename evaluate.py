@@ -293,7 +293,7 @@ def evaluate(config):
         sys.exit(1)
 
     model = LSTMAutoencoder(config).to(device)
-    checkpoint = torch.load(config.checkpoint, map_location=device)
+    checkpoint = torch.load(config.checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
     logger.info(
         f"Loaded checkpoint: {config.checkpoint} "

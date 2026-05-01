@@ -180,8 +180,9 @@ class LSTMAutoencoder(nn.Module):
     def score(self, x):
         latent, target_emb = self.encoder(x)
         recon = self.decoder(latent)
-        per_token = F.mse_loss(recon, target_emb, reduction="none").mean(dim=2)
-        return per_token.mean(dim=1)[0].item(), per_token[0].cpu().numpy(), latent[0].cpu().numpy()
+        per_token = F.mse_loss(recon, target_emb, reduction="none").mean(dim=2)  # (B, T)
+        overall = per_token.mean(dim=1)  # (B,)
+        return overall[0].item(), per_token[0].cpu().numpy(), latent[0].cpu().numpy()
 
 
 class AnomalyClassifier(nn.Module):
@@ -202,7 +203,7 @@ class AnomalyClassifier(nn.Module):
 # ---------------------------------------------------------------------------
 @st.cache_resource
 def load_autoencoder(checkpoint_path):
-    ckpt   = torch.load(checkpoint_path, map_location="cpu")
+    ckpt   = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     cfg    = ckpt["config"]
     config = dict(
         vocab_size=cfg.vocab_size, embed_dim=cfg.embed_dim,
@@ -218,7 +219,7 @@ def load_autoencoder(checkpoint_path):
 
 @st.cache_resource
 def load_classifier(classifier_path):
-    ckpt = torch.load(classifier_path, map_location="cpu")
+    ckpt = torch.load(classifier_path, map_location="cpu", weights_only=False)
     clf  = AnomalyClassifier(ckpt["latent_dim"], ckpt["n_classes"])
     clf.load_state_dict(ckpt["model_state_dict"])
     clf.eval()

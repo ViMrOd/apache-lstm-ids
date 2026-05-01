@@ -294,10 +294,8 @@ class LSTMAutoencoder(nn.Module):
         latent, target_embeddings = self.encoder(x)
         reconstructed = self.decoder(latent)
 
-        # Per-sample MSE: mean over time steps (dim=1) and embed dims (dim=2),
-        # leaving a scalar per sequence in the batch.
         per_sample_mse = F.mse_loss(
-            reconstructed, target_embeddings, reduction='none'
+            reconstructed, target_embeddings, reduction="none"
         ).mean(dim=[1, 2])   # shape: (B,)
 
         return per_sample_mse
