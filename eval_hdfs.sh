@@ -51,7 +51,7 @@ fi
 source "$ENV_FILE"
 
 PROJECT_DIR="${PROJECT_DIR:-$SLURM_SUBMIT_DIR}"
-CHECKPOINT="checkpoints/best_model.pt"
+CHECKPOINT="checkpoints/hdfs/best_model.pt"
 
 # ---------------------------------------------------------------------------
 # Job banner
@@ -114,7 +114,7 @@ python evaluate.py \
     --checkpoint            "$CHECKPOINT"   \
     --data_dir              data/           \
     --vocab_file            data/vocab.json \
-    --plot_dir              plots/          \
+    --plot_dir              plots/hdfs/          \
     --vocab_size            47              \
     --window_size           20              \
     --embed_dim             64              \
@@ -139,7 +139,7 @@ echo "  Exit code : $EXIT_CODE"
 echo "  End time  : $(date)"
 echo ""
 echo "  Output plots:"
-for f in plots/roc_curve.png plots/score_distribution.png; do
+for f in plots/hdfs/roc_curve.png plots/hdfs/score_distribution.png; do
     if [[ -f "$f" ]]; then
         echo "    ✓  $f  ($(du -sh "$f" | cut -f1))"
     else

@@ -197,6 +197,7 @@ def find_best_threshold(scores, labels, n_thresholds=200):
     lo, hi     = np.percentile(scores, 1), np.percentile(scores, 99)
     candidates = np.linspace(lo, hi, n_thresholds)
 
+    labels = (labels > 0).astype(int)  # binarize: 0=normal, >0=anomalous
     best_f1, best_threshold = -1.0, candidates[0]
 
     for thresh in candidates:
@@ -314,6 +315,7 @@ def evaluate(config):
         f"Val scores — min: {val_scores.min():.6f}, "
         f"max: {val_scores.max():.6f}, mean: {val_scores.mean():.6f}"
     )
+    val_labels = (val_labels > 0).astype(int)  # binarize multiclass labels
     logger.info(
         f"Val label distribution — "
         f"normal: {(val_labels == 0).sum():,}, "
@@ -341,6 +343,8 @@ def evaluate(config):
         f"Test scores — min: {test_scores.min():.6f}, "
         f"max: {test_scores.max():.6f}, mean: {test_scores.mean():.6f}"
     )
+    test_labels_raw = test_labels.copy()  # save raw multiclass labels
+    test_labels = (test_labels > 0).astype(int)  # binarize multiclass labels
     logger.info(
         f"Test label distribution — "
         f"normal: {(test_labels == 0).sum():,}, "
@@ -369,6 +373,35 @@ def evaluate(config):
     logger.info(f"  F1 Score   : {f1:.4f}")
     logger.info(f"  ROC-AUC    : {auc:.4f}")
     logger.info("=" * 60)
+    # ---- Per-category breakdown ------------------------------------------
+    # Uses raw multiclass labels to show detection rate per anomaly type.
+    # Load label_map if available for human-readable category names.
+    label_map_path = os.path.join(config.data_dir, "label_map.json")
+    if os.path.exists(label_map_path) and 'test_labels_raw' in locals():
+        import json
+        with open(label_map_path) as lf:
+            label_map = json.load(lf)
+        unique_cats = sorted(set(test_labels_raw.tolist()))
+        anomaly_cats = [c for c in unique_cats if c != 0]
+        if anomaly_cats:
+            logger.info("=" * 60)
+            logger.info("PER-CATEGORY BREAKDOWN (test set)")
+            logger.info("=" * 60)
+            for cat in anomaly_cats:
+                mask = test_labels_raw == cat
+                cat_scores = test_scores[mask]
+                cat_preds  = (cat_scores >= threshold).astype(int)
+                detected   = cat_preds.sum()
+                total      = mask.sum()
+                rate       = detected / total * 100 if total > 0 else 0.0
+                name       = label_map.get(str(cat), f"label_{cat}")
+                logger.info(
+                    f"  [{cat:>3}] {name:<16} : {total:>5} seqs | "
+                    f"mean_score: {cat_scores.mean():.4f} | "
+                    f"detected: {detected}/{total} ({rate:.1f}%)"
+                )
+            logger.info("=" * 60)
+
 
     # ---- Plots -----------------------------------------------------------
     os.makedirs(config.plot_dir, exist_ok=True)

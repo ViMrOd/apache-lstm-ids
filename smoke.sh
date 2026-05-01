@@ -61,8 +61,8 @@ done
 # ---------------------------------------------------------------------------
 # Defaults (smoke-test hyperparameters — intentionally tiny for speed)
 # ---------------------------------------------------------------------------
-DATA_DIR="$PROJECT_DIR/data/"
-VOCAB_FILE="$DATA_DIR/vocab.json"
+DATA_DIR="${DATA_DIR:-$PROJECT_DIR/data/hdfs/}"
+VOCAB_FILE="${VOCAB_FILE:-$PROJECT_DIR/data/hdfs/vocab.json}"
 
 VOCAB_SIZE=50        # overridden to real vocab size when --real is set
 WINDOW_SIZE=10       # overridden to match preprocessing when --real is set

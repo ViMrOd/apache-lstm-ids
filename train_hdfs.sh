@@ -90,7 +90,7 @@ echo ""
 # Navigate to project root and create expected directories
 # ---------------------------------------------------------------------------
 cd "$PROJECT_DIR"
-mkdir -p logs checkpoints runs
+mkdir -p logs checkpoints/hdfs runs/hdfs
 
 # ---------------------------------------------------------------------------
 # Launch training
@@ -101,8 +101,8 @@ echo ""
 python train.py \
     --data_dir          data/             \
     --vocab_file        data/vocab.json   \
-    --checkpoint_dir    checkpoints/      \
-    --log_dir           runs/             \
+    --checkpoint_dir    checkpoints/hdfs/      \
+    --log_dir           runs/hdfs/             \
     --vocab_size        47                \
     --window_size       20                \
     --embed_dim         64                \
@@ -129,7 +129,7 @@ echo "=========================================================="
 echo "  Training complete"
 echo "  Exit code  : $EXIT_CODE"
 echo "  End time   : $(date)"
-echo "  Checkpoint : checkpoints/best_model.pt"
+echo "  Checkpoint : checkpoints/hdfs/best_model.pt"
 echo "=========================================================="
 
 exit $EXIT_CODE

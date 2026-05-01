@@ -67,7 +67,7 @@ done
 # ---------------------------------------------------------------------------
 # User config
 # ---------------------------------------------------------------------------
-DATA_DIR="${SCRIPT_DIR}/data"
+DATA_DIR="${SCRIPT_DIR}/data/hdfs"
 SMOKE_DIR="${SCRIPT_DIR}/smoke_out"
 
 # Subset sizes — small enough to finish in minutes on real data
@@ -126,7 +126,7 @@ echo ""
 # ---------------------------------------------------------------------------
 # Prepare isolated smoke output dirs
 # ---------------------------------------------------------------------------
-mkdir -p logs "$SMOKE_DIR/data" "$SMOKE_DIR/checkpoints" \
+mkdir -p logs "$SMOKE_DIR/data/hdfs" "$SMOKE_DIR/checkpoints" \
          "$SMOKE_DIR/runs"      "$SMOKE_DIR/plots"
 
 # ---------------------------------------------------------------------------
@@ -187,11 +187,11 @@ Xs_train = X_train[train_idx]
 Xs_val,  ys_val  = X_val[val_idx],   y_val[val_idx]
 Xs_test, ys_test = X_test[test_idx], y_test[test_idx]
 
-np.save(f"{SMOKE_DIR}/data/X_train.npy", Xs_train)
-np.save(f"{SMOKE_DIR}/data/X_val.npy",   Xs_val)
-np.save(f"{SMOKE_DIR}/data/y_val.npy",   ys_val)
-np.save(f"{SMOKE_DIR}/data/X_test.npy",  Xs_test)
-np.save(f"{SMOKE_DIR}/data/y_test.npy",  ys_test)
+np.save(f"{SMOKE_DIR}/data/hdfs/X_train.npy", Xs_train)
+np.save(f"{SMOKE_DIR}/data/hdfs/X_val.npy",   Xs_val)
+np.save(f"{SMOKE_DIR}/data/hdfs/y_val.npy",   ys_val)
+np.save(f"{SMOKE_DIR}/data/hdfs/X_test.npy",  Xs_test)
+np.save(f"{SMOKE_DIR}/data/hdfs/y_test.npy",  ys_test)
 
 print(f"\n  Subsets saved to {SMOKE_DIR}/data/")
 print(f"    X_train : {Xs_train.shape}")
