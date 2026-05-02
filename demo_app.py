@@ -482,6 +482,7 @@ for key, default in [
     ("alerts", deque(maxlen=20)),
     ("total_sequences", 0),
     ("total_anomalies", 0),
+    ("latent_history", []),
     ("builder_sequence", []),
     ("custom_sequence", []),
     ("custom_result", None),
@@ -640,51 +641,31 @@ st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
 # LIVE STREAM MODE
 # ===========================================================================
 if st.session_state.mode == "LIVE STREAM":
+    # Controls
+    c1, c2 = st.columns(2)
+    start_btn = c1.button("▶ Start Stream", use_container_width=True, disabled=not model_loaded or test_X is None)
+    stop_btn  = c2.button("⏹ Stop",         use_container_width=True)
+    if start_btn:
+        st.session_state.stream_running = True
+    if stop_btn:
+        st.session_state.stream_running = False
 
-    left, right = st.columns([1.6, 1], gap="large")
+    st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
 
-    with left:
-        # Timeline
-        st.markdown('<div class="section-label">Reconstruction Score Timeline</div>', unsafe_allow_html=True)
-        timeline_placeholder = st.empty()
+    # Current sequence verdict + heatmap
+    st.markdown('<div class="section-label">Current Window — Per-Token Error</div>', unsafe_allow_html=True)
+    verdict_placeholder = st.empty()
+    heatmap_placeholder = st.empty()
 
-        # Current sequence heatmap
-        st.markdown('<div class="section-label">Current Window — Per-Token Error</div>', unsafe_allow_html=True)
-        heatmap_placeholder = st.empty()
+    # Alert feed
+    st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
+    st.markdown('<div class="section-label">Alert Feed</div>', unsafe_allow_html=True)
+    alerts_placeholder = st.empty()
 
-    with right:
-        # Gauge + verdict
-        st.markdown('<div class="section-label">Current Sequence</div>', unsafe_allow_html=True)
-        gauge_placeholder   = st.empty()
-        verdict_placeholder = st.empty()
-        category_placeholder = st.empty()
-
-        # Latent deviation chart
-        st.markdown('<div class="section-label">Why flagged — latent space deviation</div>', unsafe_allow_html=True)
-        latent_placeholder = st.empty()
-        st.markdown("<div style='margin-top:12px;'></div>", unsafe_allow_html=True)
-
-        # Controls
-        c1, c2 = st.columns(2)
-        start_btn = c1.button("▶ Start Stream", use_container_width=True, disabled=not model_loaded or test_X is None)
-        stop_btn  = c2.button("⏹ Stop",         use_container_width=True)
-
-        if start_btn:
-            st.session_state.stream_running = True
-        if stop_btn:
-            st.session_state.stream_running = False
-
-        st.markdown("<div style='margin-top:12px;'></div>", unsafe_allow_html=True)
-
-        # Alert feed
-        st.markdown('<div class="section-label">Alert Feed</div>', unsafe_allow_html=True)
-        alerts_placeholder = st.empty()
-
-    # --- Render static state ---
-    if st.session_state.scores_history:
-        fig = timeline_figure(list(st.session_state.scores_history), threshold, ds_color)
-        timeline_placeholder.pyplot(fig, use_container_width=True)
-        plt.close(fig)
+    # Latent deviation charts (persistent)
+    st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
+    st.markdown('<div class="section-label">Latent Space Deviation — Anomalies</div>', unsafe_allow_html=True)
+    latent_placeholder = st.empty()
 
     def render_alerts():
         if not st.session_state.alerts:
@@ -702,34 +683,41 @@ if st.session_state.mode == "LIVE STREAM":
         alerts_placeholder.markdown(html, unsafe_allow_html=True)
 
     render_alerts()
-
+    
     # --- Render latent history persistently ---
-    if st.session_state.get("latent_history"):
-        latent_mean_path = ds_cfg["vocab_file"].replace("vocab.json", "latent_mean.npy")
-        if Path(latent_mean_path).exists():
-            with latent_placeholder.container():
-                for entry in list(st.session_state.latent_history)[-3:]:
-                    z_scores = entry["z_scores"]
-                    fig_lat, ax_lat = plt.subplots(figsize=(5, 2.0))
-                    fig_lat.patch.set_facecolor("#0f172a")
-                    ax_lat.set_facecolor("#0f172a")
-                    colors = ["#ef4444" if z > 2.0 else "#f59e0b" if z > 1.0 else "#22c55e" for z in z_scores]
-                    ax_lat.bar(range(len(z_scores)), z_scores, color=colors, width=0.8)
-                    ax_lat.axhline(y=2.0, color="#ef4444", linestyle="--", linewidth=0.8, alpha=0.7)
-                    ax_lat.set_xlabel("Latent Dimension", color="#64748b", fontsize=8)
-                    ax_lat.set_ylabel("Std Devs", color="#64748b", fontsize=8)
-                    ax_lat.tick_params(colors="#475569", labelsize=7)
-                    for spine in ax_lat.spines.values():
-                        spine.set_edgecolor("#1e293b")
-                    top3 = np.argsort(z_scores)[-3:][::-1]
-                    ax_lat.set_title(
-                        f"Anomaly #{entry['idx']} (MSE={entry['score']:.4f}) · Dims: {chr(44).join([str(d) for d in top3])}",
-                        color="#94a3b8", fontsize=8, pad=4
-                    )
-                    fig_lat.tight_layout(pad=0.5)
-                    st.pyplot(fig_lat, use_container_width=True)
-                    plt.close(fig_lat)
-
+    # Use a real st.container() (not st.empty) so charts stack and never flicker.
+    # latent_placeholder.empty() is kept for the "no anomalies yet" message only.
+    if st.session_state.latent_history:
+        latent_placeholder.empty()   # clear the "waiting" message if present
+        for entry in st.session_state.latent_history[-5:]:
+            z_scores = entry["z_scores"]
+            fig_lat, ax_lat = plt.subplots(figsize=(5, 2.0))
+            fig_lat.patch.set_facecolor("#0f172a")
+            ax_lat.set_facecolor("#0f172a")
+            colors = ["#ef4444" if z > 2.0 else "#f59e0b" if z > 1.0 else "#22c55e"
+                      for z in z_scores]
+            ax_lat.bar(range(len(z_scores)), z_scores, color=colors, width=0.8)
+            ax_lat.axhline(y=2.0, color="#ef4444", linestyle="--", linewidth=0.8, alpha=0.7)
+            ax_lat.set_xlabel("Latent Dimension", color="#64748b", fontsize=8)
+            ax_lat.set_ylabel("Std Devs", color="#64748b", fontsize=8)
+            ax_lat.tick_params(colors="#475569", labelsize=7)
+            for spine in ax_lat.spines.values():
+                spine.set_edgecolor("#1e293b")
+            top3 = np.argsort(z_scores)[-3:][::-1]
+            ax_lat.set_title(
+                f"Anomaly #{entry['idx']} (MSE={entry['score']:.4f})"
+                f" · Dims: {', '.join(str(d) for d in top3)}",
+                color="#94a3b8", fontsize=8, pad=4,
+            )
+            fig_lat.tight_layout(pad=0.5)
+            st.pyplot(fig_lat, use_container_width=True)   # ← directly into page, not into st.empty()
+            plt.close(fig_lat)
+    else:
+        latent_placeholder.markdown(
+            '<p style="color:#1e293b;font-family:Space Mono,monospace;font-size:11px;">'
+            'Latent charts appear here when anomalies are detected.</p>',
+            unsafe_allow_html=True,
+        )
 
     # --- Stream loop ---
     if st.session_state.stream_running and model_loaded and test_X is not None:
@@ -749,6 +737,21 @@ if st.session_state.mode == "LIVE STREAM":
             st.session_state.total_anomalies += 1
             if clf_loaded:
                 category = classify_anomaly(latent, clf, idx_to_class, label_map_clf)
+                
+            # Compute z-scores and store for persistent rendering
+            latent_mean_path = ds_cfg["vocab_file"].replace("vocab.json", "latent_mean.npy")
+            latent_std_path  = ds_cfg["vocab_file"].replace("vocab.json", "latent_std.npy")
+            if Path(latent_mean_path).exists() and Path(latent_std_path).exists():
+                lat_mean = np.load(latent_mean_path)
+                lat_std  = np.load(latent_std_path).clip(min=1e-6)
+                z_scores = np.abs((latent - lat_mean) / lat_std)
+                st.session_state.latent_history.append({
+                    "idx":     st.session_state.total_sequences,
+                    "score":   score,
+                    "z_scores": z_scores,
+                })
+                # Keep only last 10 anomalies to avoid unbounded growth
+                st.session_state.latent_history = st.session_state.latent_history[-10:]
 
         st.session_state.alerts.append({
             "idx":      st.session_state.total_sequences,
@@ -758,36 +761,30 @@ if st.session_state.mode == "LIVE STREAM":
         })
 
         st.session_state.stream_idx += 1
+        
+        # Verdict + heatmap together in one placeholder (single rerun-stable slot)
+        with verdict_placeholder.container():
+            if is_anomaly:
+                st.markdown('<div class="verdict-anomaly">🚨 ANOMALOUS</div>', unsafe_allow_html=True)
+                if category:
+                    st.markdown(
+                        f'<div style="text-align:center;margin-top:8px;">'
+                        f'<span class="category-badge">⚠️ {category}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+            else:
+                st.markdown('<div class="verdict-normal">✅ NORMAL</div>', unsafe_allow_html=True)
 
-        # Render timeline
-        fig = timeline_figure(list(st.session_state.scores_history), threshold, ds_color)
-        timeline_placeholder.pyplot(fig, use_container_width=True)
-        plt.close(fig)
+        seq_tokens = x_np[0].tolist()
+        fig2 = heatmap_figure(seq_tokens, per_token, {}, label_map)
+        heatmap_placeholder.pyplot(fig2, use_container_width=True)
+        plt.close(fig2)
 
         # Render heatmap
         seq_tokens = x_np[0].tolist()
         fig2 = heatmap_figure(seq_tokens, per_token, {}, label_map)
         heatmap_placeholder.pyplot(fig2, use_container_width=True)
         plt.close(fig2)
-
-        # Gauge
-        gauge_placeholder.markdown(score_gauge_svg(score, threshold, ds_color), unsafe_allow_html=True)
-
-        # Verdict
-        if is_anomaly:
-            verdict_placeholder.markdown('<div class="verdict-anomaly">🚨 ANOMALOUS</div>', unsafe_allow_html=True)
-        else:
-            verdict_placeholder.markdown('<div class="verdict-normal">✅ NORMAL</div>', unsafe_allow_html=True)
-
-        # Category badge (BGL / Thunderbird only)
-        if category:
-            category_placeholder.markdown(
-                f'<div style="text-align:center;margin-top:8px;">'
-                f'<span class="category-badge">⚠️ {category}</span></div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            category_placeholder.empty()
 
         render_alerts()
 
