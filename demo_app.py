@@ -42,7 +42,7 @@ DATASETS = {
         "test_y":        "data/hdfs/y_test.npy",
         "classifier":    None,  # HDFS is binary only
         "vocab_size":    47,
-        "threshold":     0.008,
+        "threshold":     0.112,
         "color":         "#38bdf8",
         "icon":          "🗄️",
         "description":   "Hadoop Distributed File System — block operation logs",
@@ -135,6 +135,7 @@ HDFS_SCENARIOS = {
     "✅ Normal Block Write": ["template_5","template_5","template_3","template_4","template_3","template_4","template_3","template_4","template_30","template_10","template_30","template_32","template_32","template_32","template_7","template_7","template_7","template_7","template_7","template_7"],
     "✅ Normal Replication": ["template_1","template_1","template_3","template_4","template_3","template_4","template_5","template_5","template_3","template_4","template_5","template_32","template_32","template_32","template_7","template_7","template_7","template_7","template_7","template_7"],
     "🚨 Anomalous Block": ["template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40"],
+    "🚨 Nov 11 Incident": ["template_5","template_3","template_4","template_3","template_4","template_40","template_41","template_42","template_5","template_3","template_43","template_44","template_45","template_46","template_40","template_41","template_5","template_3","template_4","template_40"],
 }
 
 # ---------------------------------------------------------------------------
@@ -295,7 +296,7 @@ def heatmap_figure(sequence, per_token_scores, vocab_inv, label_map=None):
     n      = len(sequence)
     scores = per_token_scores[:n]
     if label_map:
-        labels = [label_map.get(str(t), str(t)) for t in sequence]
+        labels = [label_map.get(str(t), TEMPLATE_LABELS.get(str(t), (str(t), ""))[0]) for t in sequence]
     else:
         labels = [TEMPLATE_LABELS.get(t, (str(t), ""))[0] for t in sequence]
 
@@ -901,12 +902,17 @@ elif st.session_state.mode == "CUSTOM":
     def get_display_name(template_key):
         if template_key in template_strings:
             s = template_strings[template_key]
-            return (s[:48] + "...") if len(s) > 48 else s
-        token_id = raw_vocab.get(template_key, 0)
-        if label_map.get(str(token_id)):
-            return label_map[str(token_id)]
+            # Clean up Drain wildcards for readability
+            s = s.replace("<<NUM>>", "#").replace("<<BLK>>", "<block>").replace("<<IP>>", "<ip>").replace("<*>", "...")
+            # Strip leading timestamp noise
+            import re
+            s = re.sub(r"^08\d{4} ", "", s)
+            return (s[:52] + "...") if len(s) > 52 else s
         if st.session_state.dataset == "HDFS" and template_key in TEMPLATE_LABELS:
             return TEMPLATE_LABELS[template_key][0]
+        token_id = raw_vocab.get(template_key, 0)
+        if label_map.get(str(token_id)) and label_map[str(token_id)] not in ["Normal", "Anomaly"]:
+            return label_map[str(token_id)]
         return template_key
 
     available = sorted(
@@ -930,6 +936,7 @@ elif st.session_state.mode == "CUSTOM":
                 "✅ Normal Write":    ["template_5","template_5","template_3","template_4","template_3","template_4","template_3","template_4","template_30","template_10","template_30","template_32","template_32","template_32","template_7","template_7","template_7","template_7","template_7","template_7"],
                 "✅ Normal Replication": ["template_1","template_1","template_3","template_4","template_3","template_4","template_5","template_5","template_3","template_4","template_5","template_32","template_32","template_32","template_7","template_7","template_7","template_7","template_7","template_7"],
                 "🚨 Anomalous":      ["template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40"],
+                "🚨 Nov 11 Incident": ["template_5","template_3","template_4","template_3","template_4","template_40","template_41","template_42","template_5","template_3","template_43","template_44","template_45","template_46","template_40","template_41","template_5","template_3","template_4","template_40"],
             }
             sc = st.columns(len(scenarios))
             for col, (name, events) in zip(sc, scenarios.items()):
@@ -1049,6 +1056,32 @@ elif st.session_state.mode == "CUSTOM":
                     f'(MSE={per_token[worst_idx]:.4f})</p>',
                     unsafe_allow_html=True,
                 )
+                # ---- Predicted next event ----
+                if len(seq) < window_size:
+                    emb_matrix = model.encoder.embedding.weight.data
+                    inv_vocab2 = {v: k for k, v in raw_vocab.items()}
+                    ids_so_far = [raw_vocab.get(t, 0) for t in seq]
+                    ids_padded = ids_so_far + [0] * max(0, window_size - len(ids_so_far))
+                    x_pred = torch.tensor([ids_padded], dtype=torch.long)
+                    with torch.no_grad():
+                        lat3, _ = model.encoder(x_pred)
+                        recon3 = model.decoder(lat3)
+                    next_pos = len(seq)
+                    recon_vec = recon3[0, next_pos]
+                    dists = ((emb_matrix - recon_vec.unsqueeze(0)) ** 2).mean(dim=1)
+                    dists[0] = float("inf")  # exclude PAD token
+                    predicted_id = dists.argmin().item()
+                    predicted_key = inv_vocab2.get(predicted_id, str(predicted_id))
+                    predicted_name = get_display_name(predicted_key) or predicted_key
+                    st.markdown(
+                        f'<div style="margin-top:12px;padding:10px 14px;background:#0f172a;'
+                        f'border:1px solid #1e293b;border-left:3px solid #38bdf8;border-radius:8px;">'
+                        f'<span style="color:#334155;font-family:Space Mono,monospace;font-size:10px;">'
+                        f'MODEL PREDICTS NEXT EVENT</span><br/>'
+                        f'<span style="color:#38bdf8;font-family:Space Mono,monospace;font-size:11px;font-weight:bold;">'
+                        f'{predicted_name}</span></div>',
+                        unsafe_allow_html=True,
+                    )
 
 # ---------------------------------------------------------------------------
 # Footer
