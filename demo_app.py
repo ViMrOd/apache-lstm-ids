@@ -145,16 +145,15 @@ from autoencoder import LSTMAutoencoder
 
 
 def _score_sequence(model, x):
-    """Wrapper to match old score() API: returns (scalar, per_token, latent)"""
+    """Wrapper to match old score() API: returns (scalar, per_token, latent, target_emb, recon)"""
     with torch.no_grad():
         latent, target_emb = model.encoder(x)
         recon = model.decoder(latent)
         per_token = F.mse_loss(recon, target_emb, reduction="none").mean(dim=2)
-        # Use masked scoring so short/custom sequences score correctly
         mask = (x != 0).float()
         n_real = mask.sum(dim=1).clamp(min=1)
         overall = (per_token * mask).sum(dim=1) / n_real
-    return overall[0].item(), per_token[0].cpu().numpy(), latent[0].cpu().numpy()
+    return overall[0].item(), per_token[0].cpu().numpy(), latent[0].cpu().numpy(), target_emb, recon
 
 class AnomalyClassifier(nn.Module):
     def __init__(self, latent_dim, n_classes):
@@ -326,6 +325,42 @@ def heatmap_figure(sequence, per_token_scores, vocab_inv, label_map=None):
     cbar.set_label("Reconstruction Error", color="#94a3b8", fontsize=9)
     fig.tight_layout()
     return fig
+    
+def embedding_comparison_figure(input_emb, recon_emb, worst_idx):
+    """
+    Side-by-side bar chart of input embedding vs decoder reconstruction
+    at the position with highest reconstruction error.
+    """
+    dims = np.arange(len(input_emb))
+    diff = np.abs(input_emb - recon_emb)
+    top_dims = set(np.argsort(diff)[-5:].tolist())
+
+    fig, ax = plt.subplots(figsize=(4, 2.5))
+    fig.patch.set_facecolor("#0f172a")
+    ax.set_facecolor("#0f172a")
+
+    width = 0.42
+    ax.bar(dims - width/2, input_emb, width, label="Input embedding",
+           color="#22c55e", alpha=0.75)
+    ax.bar(dims + width/2, recon_emb, width, label="Reconstructed",
+           color="#ef4444", alpha=0.75)
+
+    for d in top_dims:
+        ax.axvspan(d - 0.5, d + 0.5, color="#f59e0b", alpha=0.08, zorder=0)
+
+    ax.set_xlabel("Embedding Dimension", color="#64748b", fontsize=8)
+    ax.set_ylabel("Value", color="#64748b", fontsize=8)
+    ax.tick_params(colors="#475569", labelsize=7)
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#1e293b")
+    ax.legend(fontsize=7, facecolor="#0f172a", labelcolor="#94a3b8",
+              framealpha=0.4, loc="upper right")
+    ax.set_title(
+        f"Position {worst_idx + 1} — Input vs Reconstructed Embedding",
+        color="#94a3b8", fontsize=7, pad=4,
+    )
+    fig.tight_layout(pad=0.5)
+    return fig
 
 
 # ---------------------------------------------------------------------------
@@ -483,9 +518,12 @@ for key, default in [
     ("total_sequences", 0),
     ("total_anomalies", 0),
     ("latent_history", []),
+    ("last_normal_latent", None),
     ("builder_sequence", []),
     ("custom_sequence", []),
     ("custom_result", None),
+    ("last_comparison", None),
+    ("comparison_history", []),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -684,40 +722,43 @@ if st.session_state.mode == "LIVE STREAM":
 
     render_alerts()
     
+    # --- Render latent comparison persistently ---
+    for i, (entry, cmp) in enumerate(zip(
+        st.session_state.latent_history[-5:],
+        st.session_state.comparison_history[-5:],
+    )):
+        col_a, col_b = st.columns(2)
+
+        z_scores = entry["z_scores"]
+        fig_z, ax_z = plt.subplots(figsize=(4, 2.5))
+        fig_z.patch.set_facecolor("#0f172a")
+        ax_z.set_facecolor("#0f172a")
+        colors = ["#ef4444" if z > 2.0 else "#f59e0b" if z > 1.0 else "#22c55e" for z in z_scores]
+        ax_z.bar(range(len(z_scores)), z_scores, color=colors, width=0.8)
+        ax_z.axhline(y=2.0, color="#ef4444", linestyle="--", linewidth=0.8, alpha=0.7)
+        ax_z.set_xlabel("Latent Dimension", color="#64748b", fontsize=8)
+        ax_z.set_ylabel("Std Devs from Mean", color="#64748b", fontsize=8)
+        ax_z.tick_params(colors="#475569", labelsize=7)
+        for spine in ax_z.spines.values():
+            spine.set_edgecolor("#1e293b")
+        top3 = np.argsort(z_scores)[-3:][::-1]
+        ax_z.set_title(
+            f"Anomaly #{entry['idx']} · Dims: {', '.join(str(d) for d in top3)}",
+            color="#94a3b8", fontsize=8, pad=4,
+        )
+        fig_z.tight_layout(pad=0.5)
+        col_a.pyplot(fig_z, use_container_width=True)
+        plt.close(fig_z)
+
+        fig_cmp = embedding_comparison_figure(
+            cmp["input_emb"], cmp["recon_emb"], cmp["worst_idx"]
+        )
+        col_b.pyplot(fig_cmp, use_container_width=True)
+        plt.close(fig_cmp)
+    
     # --- Render latent history persistently ---
     # Use a real st.container() (not st.empty) so charts stack and never flicker.
     # latent_placeholder.empty() is kept for the "no anomalies yet" message only.
-    if st.session_state.latent_history:
-        latent_placeholder.empty()   # clear the "waiting" message if present
-        for entry in st.session_state.latent_history[-5:]:
-            z_scores = entry["z_scores"]
-            fig_lat, ax_lat = plt.subplots(figsize=(5, 2.0))
-            fig_lat.patch.set_facecolor("#0f172a")
-            ax_lat.set_facecolor("#0f172a")
-            colors = ["#ef4444" if z > 2.0 else "#f59e0b" if z > 1.0 else "#22c55e"
-                      for z in z_scores]
-            ax_lat.bar(range(len(z_scores)), z_scores, color=colors, width=0.8)
-            ax_lat.axhline(y=2.0, color="#ef4444", linestyle="--", linewidth=0.8, alpha=0.7)
-            ax_lat.set_xlabel("Latent Dimension", color="#64748b", fontsize=8)
-            ax_lat.set_ylabel("Std Devs", color="#64748b", fontsize=8)
-            ax_lat.tick_params(colors="#475569", labelsize=7)
-            for spine in ax_lat.spines.values():
-                spine.set_edgecolor("#1e293b")
-            top3 = np.argsort(z_scores)[-3:][::-1]
-            ax_lat.set_title(
-                f"Anomaly #{entry['idx']} (MSE={entry['score']:.4f})"
-                f" · Dims: {', '.join(str(d) for d in top3)}",
-                color="#94a3b8", fontsize=8, pad=4,
-            )
-            fig_lat.tight_layout(pad=0.5)
-            st.pyplot(fig_lat, use_container_width=True)   # ← directly into page, not into st.empty()
-            plt.close(fig_lat)
-    else:
-        latent_placeholder.markdown(
-            '<p style="color:#1e293b;font-family:Space Mono,monospace;font-size:11px;">'
-            'Latent charts appear here when anomalies are detected.</p>',
-            unsafe_allow_html=True,
-        )
 
     # --- Stream loop ---
     if st.session_state.stream_running and model_loaded and test_X is not None:
@@ -725,7 +766,7 @@ if st.session_state.mode == "LIVE STREAM":
         x_np = test_X[idx:idx+1]
         x    = torch.tensor(x_np, dtype=torch.long)
 
-        score, per_token, latent = _score_sequence(model, x)
+        score, per_token, latent, target_emb, recon = _score_sequence(model, x)
         print(f"DEBUG score={score:.6f} threshold={threshold}", flush=True)
 
         is_anomaly = score >= threshold
@@ -733,6 +774,9 @@ if st.session_state.mode == "LIVE STREAM":
         st.session_state.total_sequences += 1
 
         category = None
+        if not is_anomaly:
+            st.session_state.last_normal_latent = latent.copy()
+            
         if is_anomaly:
             st.session_state.total_anomalies += 1
             if clf_loaded:
@@ -752,6 +796,20 @@ if st.session_state.mode == "LIVE STREAM":
                 })
                 # Keep only last 10 anomalies to avoid unbounded growth
                 st.session_state.latent_history = st.session_state.latent_history[-10:]
+                
+            # Store for persistent rendering
+            if st.session_state.last_normal_latent is not None:
+                worst_idx = int(per_token.argmax())
+                st.session_state.comparison_history.append({
+                    "normal":      st.session_state.last_normal_latent.copy(),
+                    "anomaly":     latent.copy(),
+                    "idx":         st.session_state.total_sequences,
+                    "score":       score,
+                    "worst_idx":   worst_idx,
+                    "input_emb":   target_emb[0, worst_idx].numpy().copy(),
+                    "recon_emb":   recon[0, worst_idx].numpy().copy(),
+                })
+                st.session_state.comparison_history = st.session_state.comparison_history[-10:]
 
         st.session_state.alerts.append({
             "idx":      st.session_state.total_sequences,
@@ -774,11 +832,6 @@ if st.session_state.mode == "LIVE STREAM":
                     )
             else:
                 st.markdown('<div class="verdict-normal">✅ NORMAL</div>', unsafe_allow_html=True)
-
-        seq_tokens = x_np[0].tolist()
-        fig2 = heatmap_figure(seq_tokens, per_token, {}, label_map)
-        heatmap_placeholder.pyplot(fig2, use_container_width=True)
-        plt.close(fig2)
 
         # Render heatmap
         seq_tokens = x_np[0].tolist()
