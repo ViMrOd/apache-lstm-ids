@@ -659,6 +659,9 @@ if st.session_state.mode == "LIVE STREAM":
         verdict_placeholder = st.empty()
         category_placeholder = st.empty()
 
+        # Latent deviation chart
+        st.markdown('<div class="section-label">Why flagged — latent space deviation</div>', unsafe_allow_html=True)
+        latent_placeholder = st.empty()
         st.markdown("<div style='margin-top:12px;'></div>", unsafe_allow_html=True)
 
         # Controls
@@ -699,6 +702,34 @@ if st.session_state.mode == "LIVE STREAM":
         alerts_placeholder.markdown(html, unsafe_allow_html=True)
 
     render_alerts()
+
+    # --- Render latent history persistently ---
+    if st.session_state.get("latent_history"):
+        latent_mean_path = ds_cfg["vocab_file"].replace("vocab.json", "latent_mean.npy")
+        if Path(latent_mean_path).exists():
+            with latent_placeholder.container():
+                for entry in list(st.session_state.latent_history)[-3:]:
+                    z_scores = entry["z_scores"]
+                    fig_lat, ax_lat = plt.subplots(figsize=(5, 2.0))
+                    fig_lat.patch.set_facecolor("#0f172a")
+                    ax_lat.set_facecolor("#0f172a")
+                    colors = ["#ef4444" if z > 2.0 else "#f59e0b" if z > 1.0 else "#22c55e" for z in z_scores]
+                    ax_lat.bar(range(len(z_scores)), z_scores, color=colors, width=0.8)
+                    ax_lat.axhline(y=2.0, color="#ef4444", linestyle="--", linewidth=0.8, alpha=0.7)
+                    ax_lat.set_xlabel("Latent Dimension", color="#64748b", fontsize=8)
+                    ax_lat.set_ylabel("Std Devs", color="#64748b", fontsize=8)
+                    ax_lat.tick_params(colors="#475569", labelsize=7)
+                    for spine in ax_lat.spines.values():
+                        spine.set_edgecolor("#1e293b")
+                    top3 = np.argsort(z_scores)[-3:][::-1]
+                    ax_lat.set_title(
+                        f"Anomaly #{entry['idx']} (MSE={entry['score']:.4f}) · Dims: {chr(44).join([str(d) for d in top3])}",
+                        color="#94a3b8", fontsize=8, pad=4
+                    )
+                    fig_lat.tight_layout(pad=0.5)
+                    st.pyplot(fig_lat, use_container_width=True)
+                    plt.close(fig_lat)
+
 
     # --- Stream loop ---
     if st.session_state.stream_running and model_loaded and test_X is not None:
@@ -952,10 +983,18 @@ elif st.session_state.mode == "CUSTOM":
         sel = st.selectbox("Event", list(options.keys()), label_visibility="collapsed")
         sel_template = options[sel]
 
+        seq_len = len(st.session_state.builder_seq)
+        pos_options = [f"End (position {seq_len + 1})"] +                       [f"Before position {i+1}" for i in range(seq_len)]
+        insert_pos = st.selectbox("Insert at", pos_options, label_visibility="collapsed")
+
         ca, cb = st.columns(2)
         if ca.button("+ Add", use_container_width=True,
-                     disabled=len(st.session_state.builder_seq) >= window_size):
-            st.session_state.builder_seq.append(sel_template)
+                     disabled=seq_len >= window_size):
+            if insert_pos.startswith("End"):
+                st.session_state.builder_seq.append(sel_template)
+            else:
+                idx = int(insert_pos.split("position ")[1]) - 1
+                st.session_state.builder_seq.insert(idx, sel_template)
             st.rerun()
         if cb.button("Clear all", use_container_width=True):
             st.session_state.builder_seq = []
@@ -1056,6 +1095,45 @@ elif st.session_state.mode == "CUSTOM":
                     f'(MSE={per_token[worst_idx]:.4f})</p>',
                     unsafe_allow_html=True,
                 )
+
+                # ---- Expected vs Got table ----
+                st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
+                st.markdown('<div class="section-label">Reconstruction — expected vs got</div>', unsafe_allow_html=True)
+                emb_matrix_t = model.encoder.embedding.weight.data
+                inv_vocab_t = {v: k for k, v in raw_vocab.items()}
+                ids_t = [raw_vocab.get(t, 0) for t in seq]
+                ids_t = ids_t + [0] * max(0, window_size - len(ids_t))
+                x_t = torch.tensor([ids_t], dtype=torch.long)
+                with torch.no_grad():
+                    lat_t, _ = model.encoder(x_t)
+                    recon_t = model.decoder(lat_t)
+                tbl = '<table style="width:100%;font-family:Space Mono,monospace;font-size:10px;border-collapse:collapse;">'
+                tbl += '<tr style="color:#334155;border-bottom:1px solid #1e293b;"><th style="text-align:left;padding:4px 6px;">#</th><th style="text-align:left;padding:4px 6px;">Got</th><th style="text-align:left;padding:4px 6px;">Expected</th><th style="text-align:right;padding:4px 6px;">MSE</th></tr>'
+                for pos in range(len(seq)):
+                    actual_id = ids_t[pos]
+                    if actual_id == 0:
+                        continue
+                    recon_vec = recon_t[0, pos]
+                    dists = ((emb_matrix_t - recon_vec.unsqueeze(0)) ** 2).mean(dim=1)
+                    dists[0] = float('inf')
+                    expected_id = dists.argmin().item()
+                    actual_key = inv_vocab_t.get(actual_id, str(actual_id))
+                    expected_key = inv_vocab_t.get(expected_id, str(expected_id))
+                    match = actual_key == expected_key
+                    got_name = get_display_name(actual_key)[:30]
+                    exp_name = get_display_name(expected_key)[:30]
+                    mse = float(per_token[pos])
+                    clr = "#22c55e" if match else "#ef4444"
+                    icon = "ok" if match else "!!"
+                    tbl += f'<tr style="border-top:1px solid #0f172a;">'
+                    tbl += f'<td style="padding:3px 6px;color:#475569;">{pos+1}</td>'
+                    tbl += f'<td style="padding:3px 6px;color:#38bdf8;">{got_name}</td>'
+                    tbl += f'<td style="padding:3px 6px;color:#94a3b8;">{exp_name}</td>'
+                    tbl += f'<td style="padding:3px 6px;text-align:right;color:{clr};">[{icon}] {mse:.4f}</td>'
+                    tbl += '</tr>'
+                tbl += '</table>'
+                st.markdown(tbl, unsafe_allow_html=True)
+
                 # ---- Predicted next event ----
                 if len(seq) < window_size:
                     emb_matrix = model.encoder.embedding.weight.data
