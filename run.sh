@@ -272,6 +272,7 @@ case "$COMMAND" in
     classify-bgl)          cmd_classify bgl ;;
     classify-tb)           cmd_classify thunderbird ;;
     classify-all)          cmd_classify_all ;;
+    demo)                  bash "$PROJECT_DIR/demo_osc.sh" ;;
     status)                cmd_status ;;
     logs)                  cmd_logs ;;
     # Backward-compatible aliases

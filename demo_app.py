@@ -132,58 +132,28 @@ HDFS_CATEGORIES = {
 }
 
 HDFS_SCENARIOS = {
-    "✅ Normal Write": ["template_1","template_2","template_4","template_5","template_4","template_5","template_12","template_9","template_14","template_6"],
-    "⚠️ Failed Replication": ["template_1","template_2","template_4","template_5","template_7","template_13","template_17","template_20","template_27","template_21"],
-    "🚨 Corrupt Block": ["template_1","template_2","template_4","template_18","template_19","template_16","template_35","template_37","template_38","template_46"],
+    "✅ Normal Block Write": ["template_5","template_5","template_3","template_4","template_3","template_4","template_3","template_4","template_30","template_10","template_30","template_32","template_32","template_32","template_7","template_7","template_7","template_7","template_7","template_7"],
+    "✅ Normal Replication": ["template_1","template_1","template_3","template_4","template_3","template_4","template_5","template_5","template_3","template_4","template_5","template_32","template_32","template_32","template_7","template_7","template_7","template_7","template_7","template_7"],
+    "🚨 Anomalous Block": ["template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40"],
 }
 
 # ---------------------------------------------------------------------------
 # Model definitions (must match autoencoder.py)
 # ---------------------------------------------------------------------------
-class LSTMEncoder(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.embedding = nn.Embedding(config["vocab_size"], config["embed_dim"], padding_idx=config["padding_idx"])
-        self.lstm = nn.LSTM(config["embed_dim"], config["hidden_dim"], num_layers=config["num_layers"], batch_first=True, dropout=config["dropout"] if config["num_layers"] > 1 else 0.0)
-        self.hidden_to_latent = nn.Linear(config["hidden_dim"], config["latent_dim"])
-
-    def forward(self, x):
-        emb = self.embedding(x)
-        _, (h_n, _) = self.lstm(emb)
-        latent = self.hidden_to_latent(h_n[-1])
-        return latent, emb
+from autoencoder import LSTMAutoencoder
 
 
-class LSTMDecoder(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.latent_to_hidden = nn.Linear(config["latent_dim"], config["embed_dim"])
-        self.lstm = nn.LSTM(config["embed_dim"], config["hidden_dim"], num_layers=config["num_layers"], batch_first=True, dropout=config["dropout"] if config["num_layers"] > 1 else 0.0)
-        self.output_projection = nn.Linear(config["hidden_dim"], config["embed_dim"])
-
-    def forward(self, latent):
-        B, T = latent.size(0), self.config["window_size"]
-        proj = self.latent_to_hidden(latent).unsqueeze(1).expand(B, T, -1)
-        out, _ = self.lstm(proj)
-        return self.output_projection(out)
-
-
-class LSTMAutoencoder(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.encoder = LSTMEncoder(config)
-        self.decoder = LSTMDecoder(config)
-
-    @torch.no_grad()
-    def score(self, x):
-        latent, target_emb = self.encoder(x)
-        recon = self.decoder(latent)
-        per_token = F.mse_loss(recon, target_emb, reduction="none").mean(dim=2)  # (B, T)
-        overall = per_token.mean(dim=1)  # (B,)
-        return overall[0].item(), per_token[0].cpu().numpy(), latent[0].cpu().numpy()
-
+def _score_sequence(model, x):
+    """Wrapper to match old score() API: returns (scalar, per_token, latent)"""
+    with torch.no_grad():
+        latent, target_emb = model.encoder(x)
+        recon = model.decoder(latent)
+        per_token = F.mse_loss(recon, target_emb, reduction="none").mean(dim=2)
+        # Use masked scoring so short/custom sequences score correctly
+        mask = (x != 0).float()
+        n_real = mask.sum(dim=1).clamp(min=1)
+        overall = (per_token * mask).sum(dim=1) / n_real
+    return overall[0].item(), per_token[0].cpu().numpy(), latent[0].cpu().numpy()
 
 class AnomalyClassifier(nn.Module):
     def __init__(self, latent_dim, n_classes):
@@ -205,13 +175,17 @@ class AnomalyClassifier(nn.Module):
 def load_autoencoder(checkpoint_path):
     ckpt   = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     cfg    = ckpt["config"]
+    # Handle both Namespace and dict config formats
+    get = (lambda k: getattr(cfg, k)) if hasattr(cfg, 'vocab_size') else (lambda k: cfg[k])
     config = dict(
-        vocab_size=cfg.vocab_size, embed_dim=cfg.embed_dim,
-        hidden_dim=cfg.hidden_dim, latent_dim=cfg.latent_dim,
-        num_layers=cfg.num_layers, dropout=cfg.dropout,
-        window_size=cfg.window_size, padding_idx=0,
+        vocab_size=get('vocab_size'), embed_dim=get('embed_dim'),
+        hidden_dim=get('hidden_dim'), latent_dim=get('latent_dim'),
+        num_layers=get('num_layers'), dropout=get('dropout'),
+        window_size=get('window_size'), padding_idx=0,
     )
-    model = LSTMAutoencoder(config)
+    from argparse import Namespace
+    ns_config = Namespace(**config)
+    model = LSTMAutoencoder(ns_config)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
     return model, config
@@ -559,7 +533,7 @@ with st.sidebar:
     ds_cfg    = DATASETS[st.session_state.dataset]
     threshold = st.slider(
         "Anomaly threshold",
-        min_value=0.001, max_value=0.1,
+        min_value=0.001, max_value=0.5,
         value=ds_cfg["threshold"],
         step=0.001, format="%.3f",
     )
@@ -731,7 +705,8 @@ if st.session_state.mode == "LIVE STREAM":
         x_np = test_X[idx:idx+1]
         x    = torch.tensor(x_np, dtype=torch.long)
 
-        score, per_token, latent = model.score(x)
+        score, per_token, latent = _score_sequence(model, x)
+        print(f"DEBUG score={score:.6f} threshold={threshold}", flush=True)
 
         is_anomaly = score >= threshold
         st.session_state.scores_history.append(score)
@@ -859,9 +834,13 @@ elif st.session_state.mode == "BUILDER":
                 if model_loaded:
                     vocab = json.load(open(ds_cfg["vocab_file"]))
                     ids   = [vocab.get(t, 0) for t in seq]
-                    ids   = ids[:window_size] + [0] * max(0, window_size - len(ids))
+                    ids   = ids[:window_size]
+                    # Repeat sequence to fill window instead of padding with zeros
+                    # Padding zeros produce high reconstruction error in unmasked scoring
+                    while len(ids) < window_size:
+                        ids = (ids + ids)[:window_size]
                     x     = torch.tensor([ids], dtype=torch.long)
-                    score, per_token, latent = model.score(x)
+                    score, per_token, latent = _score_sequence(model, x)
                 else:
                     score     = float(np.random.uniform(0.01, 0.12))
                     per_token = np.random.uniform(0.001, 0.15, 20)
@@ -902,119 +881,141 @@ elif st.session_state.mode == "BUILDER":
                     )
 
 # ===========================================================================
-# CUSTOM MODE — build and analyze any sequence for any dataset
+# CUSTOM MODE — interactive sequence builder with live scoring
 # ===========================================================================
 elif st.session_state.mode == "CUSTOM":
 
-    st.markdown('<div class="section-label">Custom Sequence Analyzer</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<p style="color:#475569;font-family:Space Mono,monospace;font-size:11px;margin-bottom:16px;">'
-        'Build any sequence from the active dataset\'s vocabulary and score it live. '
-        'Works for all three datasets — use this to demonstrate specific fault patterns.</p>',
-        unsafe_allow_html=True,
+    # Load vocab and template strings
+    raw_vocab = {}
+    window_size = ae_config["window_size"] if model_loaded else 20
+
+    if Path(ds_cfg["vocab_file"]).exists():
+        raw_vocab = json.load(open(ds_cfg["vocab_file"]))
+
+    # Load real template strings if available (drop template_strings.json in data dir)
+    template_strings = {}
+    ts_path = ds_cfg["vocab_file"].replace("vocab.json", "template_strings.json")
+    if Path(ts_path).exists():
+        template_strings = json.load(open(ts_path))
+
+    def get_display_name(template_key):
+        if template_key in template_strings:
+            s = template_strings[template_key]
+            return (s[:48] + "...") if len(s) > 48 else s
+        token_id = raw_vocab.get(template_key, 0)
+        if label_map.get(str(token_id)):
+            return label_map[str(token_id)]
+        if st.session_state.dataset == "HDFS" and template_key in TEMPLATE_LABELS:
+            return TEMPLATE_LABELS[template_key][0]
+        return template_key
+
+    available = sorted(
+        [k for k in raw_vocab.keys() if k != "<PAD>"],
+        key=lambda k: raw_vocab[k]
     )
 
-    left, right = st.columns([1.2, 1], gap="large")
+    if "builder_seq" not in st.session_state:
+        st.session_state.builder_seq = []
+
+    # ---- Header ----
+    st.markdown('''<div class="section-label">Sequence Builder — construct any log sequence and score it live</div>''', unsafe_allow_html=True)
+
+    left, right = st.columns([1.1, 1], gap="large")
 
     with left:
-        # Build vocab options from label_map + vocab file
-        vocab_options = {}
-        if Path(ds_cfg["vocab_file"]).exists():
-            raw_vocab = json.load(open(ds_cfg["vocab_file"]))
-            for template_key, token_id in raw_vocab.items():
-                if template_key == "<PAD>":
-                    continue
-                # Use label_map name if available, else template key
-                display_name = label_map.get(str(token_id), template_key)
-                vocab_options[f"{template_key} — {display_name}"] = template_key
+        # Quick scenarios
+        st.markdown('<div class="section-label">Quick Load</div>', unsafe_allow_html=True)
+        if st.session_state.dataset == "HDFS":
+            scenarios = {
+                "✅ Normal Write":    ["template_5","template_5","template_3","template_4","template_3","template_4","template_3","template_4","template_30","template_10","template_30","template_32","template_32","template_32","template_7","template_7","template_7","template_7","template_7","template_7"],
+                "✅ Normal Replication": ["template_1","template_1","template_3","template_4","template_3","template_4","template_5","template_5","template_3","template_4","template_5","template_32","template_32","template_32","template_7","template_7","template_7","template_7","template_7","template_7"],
+                "🚨 Anomalous":      ["template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40","template_1","template_40"],
+            }
+            sc = st.columns(len(scenarios))
+            for col, (name, events) in zip(sc, scenarios.items()):
+                if col.button(name, use_container_width=True, key=f"cscen_{name}"):
+                    st.session_state.builder_seq = list(events)
+                    st.rerun()
 
-        if not vocab_options:
-            st.warning("Vocab file not found. Cannot build custom sequences.")
+        st.markdown("<div style='margin-top:14px;'></div>", unsafe_allow_html=True)
+
+        # Event selector
+        st.markdown('<div class="section-label">Add Event</div>', unsafe_allow_html=True)
+        options = {f"[{raw_vocab.get(t,0)}] {get_display_name(t)}": t for t in available}
+        sel = st.selectbox("Event", list(options.keys()), label_visibility="collapsed")
+        sel_template = options[sel]
+
+        ca, cb = st.columns(2)
+        if ca.button("+ Add", use_container_width=True,
+                     disabled=len(st.session_state.builder_seq) >= window_size):
+            st.session_state.builder_seq.append(sel_template)
+            st.rerun()
+        if cb.button("Clear all", use_container_width=True):
+            st.session_state.builder_seq = []
+            st.rerun()
+
+        st.markdown("<div style='margin-top:14px;'></div>", unsafe_allow_html=True)
+
+        # Sequence editor
+        st.markdown('<div class="section-label">Sequence</div>', unsafe_allow_html=True)
+        seq = st.session_state.builder_seq
+
+        if not seq:
+            st.markdown('<p style="color:#1e293b;font-family:Space Mono,monospace;font-size:11px;">Add events above or load a scenario.</p>', unsafe_allow_html=True)
         else:
-            window_size = ae_config["window_size"] if model_loaded else 20
-
-            st.markdown('<div class="section-label">Select Events (up to 20)</div>', unsafe_allow_html=True)
-
-            # Multiselect — user picks templates by display name
-            selected_display = st.multiselect(
-                "Events",
-                options=list(vocab_options.keys()),
-                default=[list(vocab_options.keys())[i] for i in range(min(5, len(vocab_options)))],
-                max_selections=window_size,
-                label_visibility="collapsed",
-                help="Select up to 20 log events in order. The model will score this sequence.",
-            )
-
-            # Convert display names back to template keys
-            selected_templates = [vocab_options[d] for d in selected_display]
-            st.session_state.custom_sequence = selected_templates
-
-            st.markdown(f"<p style='color:#334155;font-family:Space Mono,monospace;font-size:10px;'>{len(selected_templates)}/{window_size} events selected</p>", unsafe_allow_html=True)
-
-            st.markdown("<div style='margin-top:10px;'></div>", unsafe_allow_html=True)
-
-            # Show selected sequence as token chips
-            if selected_templates:
-                chips = "".join(
-                    f'<span style="display:inline-block;background:#0f172a;border:1px solid #1e293b;'
-                    f'border-radius:6px;padding:3px 8px;margin:2px;font-family:Space Mono,monospace;'
-                    f'font-size:10px;color:{ds_color};">'
-                    f'{label_map.get(str(raw_vocab.get(t,0)), t)}</span>'
-                    for t in selected_templates
+            for i, t in enumerate(seq):
+                name = get_display_name(t)
+                c1, c2, c3, c4 = st.columns([3, 0.4, 0.4, 0.4])
+                c1.markdown(
+                    f'<div style="padding:5px 8px;background:#0f172a;border:1px solid #1e293b;'
+                    f'border-radius:6px;font-family:Space Mono,monospace;font-size:10px;color:{ds_color};">'
+                    f'<span style="color:#334155;margin-right:6px;">{i+1}.</span>{name}</div>',
+                    unsafe_allow_html=True,
                 )
-                st.markdown(chips, unsafe_allow_html=True)
+                if c2.button("↑", key=f"u_{i}", disabled=i==0):
+                    seq[i], seq[i-1] = seq[i-1], seq[i]; st.rerun()
+                if c3.button("↓", key=f"d_{i}", disabled=i==len(seq)-1):
+                    seq[i], seq[i+1] = seq[i+1], seq[i]; st.rerun()
+                if c4.button("✕", key=f"r_{i}"):
+                    seq.pop(i); st.rerun()
 
-            st.markdown("<div style='margin-top:14px;'></div>", unsafe_allow_html=True)
+            st.caption(f"{len(seq)} / {window_size} positions")
 
-            analyze_btn = st.button(
-                "🔍 Analyze Sequence",
-                use_container_width=True,
-                disabled=not model_loaded or len(selected_templates) == 0,
+    with right:
+        st.markdown('<div class="section-label">Live Analysis</div>', unsafe_allow_html=True)
+        seq = st.session_state.builder_seq
+
+        if not seq:
+            st.markdown(
+                '<div style="color:#1e293b;font-family:Space Mono,monospace;font-size:12px;'
+                'padding:60px 0;text-align:center;">Add events to see analysis</div>',
+                unsafe_allow_html=True,
             )
-
-            if analyze_btn and selected_templates and model_loaded:
-                raw_vocab = json.load(open(ds_cfg["vocab_file"]))
-                ids  = [raw_vocab.get(t, 0) for t in selected_templates]
-                ids  = ids[:window_size] + [0] * max(0, window_size - len(ids))
-                x    = torch.tensor([ids], dtype=torch.long)
-                score, per_token, latent = model.score(x)
+        else:
+            if model_loaded:
+                ids = [raw_vocab.get(t, 0) for t in seq]
+                ids = ids + [0] * max(0, window_size - len(ids))
+                ids = ids[:window_size]
+                x = torch.tensor([ids], dtype=torch.long)
+                score, per_token, latent = _score_sequence(model, x)
 
                 category = None
                 if score >= threshold and clf_loaded:
                     category = classify_anomaly(latent, clf, idx_to_class, label_map_clf)
+            else:
+                score = float(np.random.uniform(0.01, 0.12))
+                per_token = np.random.uniform(0.001, 0.15, window_size)
+                latent = np.zeros(32)
+                category = None
+                st.info("Preview mode — load a checkpoint for real scores.")
 
-                st.session_state.custom_result = {
-                    "score":      score,
-                    "per_token":  per_token,
-                    "latent":     latent,
-                    "sequence":   selected_templates,
-                    "is_anomaly": score >= threshold,
-                    "category":   category,
-                }
+            is_anomaly = score >= threshold
 
-    with right:
-        result = st.session_state.custom_result
-
-        if result is None:
-            st.markdown(
-                '<div style="color:#1e293b;font-family:Space Mono,monospace;font-size:12px;'
-                'padding:80px 0;text-align:center;">Select events and click Analyze</div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            score      = result["score"]
-            per_token  = result["per_token"]
-            is_anomaly = result["is_anomaly"]
-            category   = result["category"]
-            seq        = result["sequence"]
-
-            # Verdict
             if is_anomaly:
                 st.markdown('<div class="verdict-anomaly">🚨 ANOMALOUS</div>', unsafe_allow_html=True)
             else:
                 st.markdown('<div class="verdict-normal">✅ NORMAL</div>', unsafe_allow_html=True)
 
-            # Category badge
             if category:
                 st.markdown(
                     f'<div style="text-align:center;margin-top:8px;">'
@@ -1027,9 +1028,9 @@ elif st.session_state.mode == "CUSTOM":
 
             st.markdown("<div style='margin-top:10px;'></div>", unsafe_allow_html=True)
             m1, m2, m3 = st.columns(3)
-            m1.metric("MSE Score",  f"{score:.4f}")
-            m2.metric("Threshold",  f"{threshold:.3f}")
-            m3.metric("Margin",     f"{score - threshold:+.4f}", delta_color="inverse")
+            m1.metric("MSE Score", f"{score:.4f}")
+            m2.metric("Threshold", f"{threshold:.3f}")
+            m3.metric("Margin", f"{score - threshold:+.4f}", delta_color="inverse")
 
             st.markdown("<div style='margin-top:12px;'></div>", unsafe_allow_html=True)
             st.markdown('<div class="section-label">Per-Event Reconstruction Error</div>', unsafe_allow_html=True)
@@ -1038,12 +1039,9 @@ elif st.session_state.mode == "CUSTOM":
             st.pyplot(fig, use_container_width=True)
             plt.close(fig)
 
-            if seq:
-                worst_idx  = int(per_token[:len(seq)].argmax())
-                worst_name = label_map.get(
-                    str(raw_vocab.get(seq[worst_idx], 0) if Path(ds_cfg["vocab_file"]).exists() else 0),
-                    seq[worst_idx]
-                )
+            if seq and model_loaded:
+                worst_idx = int(per_token[:len(seq)].argmax())
+                worst_name = get_display_name(seq[worst_idx])
                 st.markdown(
                     f'<p style="color:#475569;font-size:11px;font-family:Space Mono,monospace;">'
                     f'Highest error at position {worst_idx+1}: '

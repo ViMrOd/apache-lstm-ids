@@ -179,7 +179,7 @@ def get_dataloaders(config):
 # Checkpoint helpers
 # ---------------------------------------------------------------------------
 
-def save_checkpoint(model, optimizer, epoch, val_loss, path):
+def save_checkpoint(model, optimizer, epoch, val_loss, path, config=None):
     """
     Save a full training checkpoint.
 
@@ -363,7 +363,7 @@ def train(config):
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             epochs_without_improvement = 0
-            save_checkpoint(model, optimizer, epoch, val_loss, best_ckpt_path)
+            save_checkpoint(model, optimizer, epoch, val_loss, best_ckpt_path, config)
             logger.info(f"  ↳ New best val_loss: {best_val_loss:.6f}")
         else:
             epochs_without_improvement += 1
@@ -376,7 +376,7 @@ def train(config):
             periodic_path = os.path.join(
                 config.checkpoint_dir, f"epoch_{epoch:04d}.pt"
             )
-            save_checkpoint(model, optimizer, epoch, val_loss, periodic_path)
+            save_checkpoint(model, optimizer, epoch, val_loss, periodic_path, config)
 
         if epochs_without_improvement >= config.patience:
             logger.info(
