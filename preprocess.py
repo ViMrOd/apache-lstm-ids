@@ -1,7 +1,7 @@
 """
 preprocess.py  —  Multi-dataset LSTM Autoencoder Preprocessing Pipeline
 ========================================================================
-Supports: HDFS, BGL, Spirit, Thunderbird
+Supports: HDFS, BGL, Thunderbird
 
 Each dataset is handled by a DatasetAdapter subclass that knows:
   • how to read raw log lines
@@ -14,10 +14,9 @@ split, PyTorch DataLoaders) is dataset-agnostic.
 
 Usage
 -----
-    python preprocess.py --dataset hdfs      --log HDFS.log       --labels anomaly_label.csv
-    python preprocess.py --dataset bgl       --log BGL.log
-    python preprocess.py --dataset spirit    --log Spirit.log
-    python preprocess.py --dataset thunderbird --log Thunderbird.log
+    python preprocess.py --dataset hdfs --log HDFS.log --labels anomaly_label.csv
+    python preprocess.py --dataset bgl --log BGL.log
+    python preprocess.py --dataset thunderbird --log Thunderbird.log --max-lines 2000000
 
 Optional flags (apply to all datasets):
     --window-size 20   (default 20)
@@ -31,10 +30,8 @@ HDFS        : Normal | Anomaly  (external CSV; extend by replacing 'Anomaly'
 BGL         : Normal | (fault alert code, e.g. 'APPREAD', 'KERNSEG', ...)
               The BGL format encodes '-' for normal lines and the alert type
               for anomalous ones — no external label file needed.
-Spirit      : Normal | (alert type extracted from inline flag field)
-              Same inline convention as BGL.
 Thunderbird : Normal | (component/severity-derived type from inline flag)
-              Same inline convention as BGL/Spirit.
+              Same inline convention as BGL.
 
 All adapters produce {block_id -> label_string} dicts consumed by the
 shared encode_labels() step, so every dataset feeds a consistent
@@ -61,6 +58,7 @@ from drain3.masking import MaskingInstruction
 
 
 # ── Global defaults ────────────────────────────────────────────────────
+
 WINDOW_SIZE = 20
 TRAIN_RATIO = 0.70
 VAL_RATIO   = 0.15
@@ -219,72 +217,6 @@ class BGLAdapter(DatasetAdapter):
         return [parts[3]] if len(parts) >= 7 else []
 
 
-class SpiritAdapter(DatasetAdapter):
-    """
-    Spirit supercomputer log dataset (Sandia National Laboratories).
-
-    Log format (space-separated):
-        Field 0 : label flag  ('-' = normal, else alert type, e.g. 'FATAL')
-        Field 1 : Unix timestamp
-        Field 2 : date string
-        Field 3 : node / compute unit identifier
-        Field 4 : time string
-        Field 5+: log message
-
-    Session key : node identifier (field 3), same rationale as BGL.
-    Labels      : inline field 0, same convention as BGL.
-                  Common Spirit anomaly types: 'FATAL', 'ERROR', 'FAILURE',
-                  'WARNING' (depending on the release of the dataset).
-
-    Spirit is significantly larger than BGL (~500 M lines in the full
-    release).  If memory is a concern, pass --max-lines N to cap ingestion.
-    """
-
-    name = "spirit"
-
-    def __init__(self, log_path: str, label_path: str | None = None,
-                 max_lines: int | None = None):
-        super().__init__(log_path, label_path)
-        self.max_lines = max_lines
-
-    def load(self) -> tuple[list[str], dict[str, str]]:
-        print(f"    Reading {self.log_path} ...")
-        raw_lines: list[str] = []
-        with open(self.log_path, encoding="utf-8", errors="replace") as f:
-            for i, line in enumerate(f):
-                if self.max_lines and i >= self.max_lines:
-                    break
-                raw_lines.append(line)
-
-        node_labels: dict[str, list[str]] = defaultdict(list)
-
-        for line in raw_lines:
-            parts = line.split()
-            if len(parts) < 5:
-                continue
-            alert_flag = parts[0]
-            node_id    = parts[3]
-            label = "Normal" if alert_flag == "-" else alert_flag
-            node_labels[node_id].append(label)
-
-        labels_dict: dict[str, str] = {}
-        for node_id, lbls in node_labels.items():
-            anomaly_lbls = [l for l in lbls if l != "Normal"]
-            if anomaly_lbls:
-                labels_dict[node_id] = Counter(anomaly_lbls).most_common(1)[0][0]
-            else:
-                labels_dict[node_id] = "Normal"
-
-        print(f"    Lines loaded    : {len(raw_lines):,}")
-        print(f"    Node sessions   : {len(labels_dict):,}")
-        print(f"    Unique labels   : {sorted(set(labels_dict.values()))[:10]}")
-        return raw_lines, labels_dict
-
-    def extract_block_id(self, line: str) -> list[str]:
-        parts = line.split()
-        return [parts[3]] if len(parts) >= 5 else []
-
-
 class ThunderbirdAdapter(DatasetAdapter):
     """
     Thunderbird supercomputer log dataset (Sandia National Laboratories).
@@ -376,7 +308,6 @@ class ThunderbirdAdapter(DatasetAdapter):
 ADAPTER_REGISTRY: dict[str, type[DatasetAdapter]] = {
     "hdfs":        HDFSAdapter,
     "bgl":         BGLAdapter,
-    "spirit":      SpiritAdapter,
     "thunderbird": ThunderbirdAdapter,
 }
 
@@ -450,7 +381,7 @@ def _build_drain_config() -> TemplateMinerConfig:
         MaskingInstruction(r"blk_-?\d+",                                      "<BLK>"),
         MaskingInstruction(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?",    "<IP>"),
         MaskingInstruction(r"(?<=[^A-Za-z0-9])(\-?\+?\d+)(?=[^A-Za-z0-9])|[0-9]+$", "<NUM>"),
-        # Node identifiers common in BGL/Spirit/Thunderbird
+        # Node identifiers common in BGL/Thunderbird
         MaskingInstruction(r"R\d{2}-M\d-N\d-[A-Z]:[A-Z]\d{2}-U\d{2}",       "<NODE>"),
     ]
     return cfg
@@ -564,6 +495,9 @@ def group_by_session(structured: list[dict],
 # ══════════════════════════════════════════════════════════════════════
 # 3.  VOCABULARY
 # ══════════════════════════════════════════════════════════════════════
+"""
+Creates the vocabulary for the LSTM, which puts it into a more human-readable format for mapping template names to their corresponding IDs. This serves as a bridge between the preprocessing pipeline and the LSTM. 
+"""
 
 def build_vocab(miner: TemplateMiner,
                 output_path: Path | None = None,
@@ -591,11 +525,18 @@ def build_vocab(miner: TemplateMiner,
 # 4.  WINDOWING
 # ══════════════════════════════════════════════════════════════════════
 
+"""
+This forces the sessions into fixed size tokens (the same size as the window) and sessions shorter than that are padded with 0s. It keeps the tail end of what was truncated because anomalous events tend to appear late in the block’s lifecycle.
+"""
+
 def _pad_or_truncate(seq: list[int], window_size: int, pad_id: int = 0) -> list[int]:
     if len(seq) >= window_size:
         return seq[-window_size:]
     return seq + [pad_id] * (window_size - len(seq))
 
+"""
+This is where pad_or_truncate() is applied and where the window is applied. It creates a sequence of tokens where it applies the pad_or_truncate logic to signal from X (the array of ids) the result y of whether or not the array is an anomaly (basically, is the array padded or does it contain a list of continual ids to signal an anomaly might have happened.)
+"""
 
 def build_windows(sessions: list[dict],
                   window_size: int,
@@ -770,6 +711,14 @@ def run_pipeline(dataset:     str,
 
     # 4. Vocabulary
     vocab = build_vocab(miner, output_path=output_dir / "vocab.json")
+    
+    #show real template strings in vocab for results
+    template_map = {}
+    for tid, cluster in miner.drain.id_to_cluster.items():
+        template_map[f'template{tid}'] = cluster.get_template()
+    
+    with open(output_dir / 'template_strings.json', 'w') as f:
+        json.dump(template_map, f, indent=2)
 
     # 5. Windowing
     X, y, block_ids = build_windows(sessions, window_size)
@@ -836,7 +785,7 @@ if __name__ == "__main__":
     # Optional per-dataset
     parser.add_argument(
         "--labels", default=None, metavar="PATH",
-        help="External label CSV (required for HDFS; ignored for BGL/Spirit/Thunderbird)",
+        help="External label CSV (required for HDFS; ignored for BGL/Thunderbird)",
     )
     parser.add_argument(
         "--component-split", action="store_true",
@@ -844,7 +793,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--max-lines", type=int, default=None, metavar="N",
-        help="Spirit/Thunderbird only: cap number of log lines read (useful for huge files)",
+        help="Thunderbird only: cap number of log lines read (useful for huge files)",
     )
 
     # Pipeline hyper-parameters
@@ -858,7 +807,7 @@ if __name__ == "__main__":
     adapter_kwargs: dict = {}
     if args.dataset == "thunderbird":
         adapter_kwargs["component_split"] = args.component_split
-    if args.dataset in ("spirit", "thunderbird") and args.max_lines:
+    if args.dataset in ("thunderbird") and args.max_lines:
         adapter_kwargs["max_lines"] = args.max_lines
 
     run_pipeline(
@@ -870,3 +819,4 @@ if __name__ == "__main__":
         output_dir  = args.output_dir,
         **adapter_kwargs,
     )
+
