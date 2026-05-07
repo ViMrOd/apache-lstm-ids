@@ -138,6 +138,19 @@ HDFS_SCENARIOS = {
     "🚨 Nov 11 Incident": ["template_5","template_3","template_4","template_3","template_4","template_40","template_41","template_42","template_5","template_3","template_43","template_44","template_45","template_46","template_40","template_41","template_5","template_3","template_4","template_40"],
 }
 
+DIM_GROUPS = {
+    'pipeline':  [1, 3, 5, 7, 9, 20, 22, 23, 27, 29, 30],
+    'temporal':  [0, 2, 6, 8, 10, 11, 13, 14, 16, 17, 19, 21, 25, 26, 31],
+    'exception': [12, 15, 18, 24],
+    'noise':     [4, 28],
+}
+DIM_GROUP_LABELS = {
+    'pipeline':  ('🔵', 'Pipeline State',     'Tracks read/write pipeline activity'),
+    'temporal':  ('🟡', 'Temporal Context',   'Sensitive to Nov 10/11 date patterns'),
+    'exception': ('🔴', 'Exception Detector', 'Responds to serve-side failure signals'),
+    'noise':     ('⚪', 'Noise Dimension',    'No clear semantic interpretation'),
+}
+
 # ---------------------------------------------------------------------------
 # Model definitions (must match autoencoder.py)
 # ---------------------------------------------------------------------------
@@ -231,6 +244,41 @@ def classify_anomaly(latent_vec, clf, idx_to_class, label_map):
 # ---------------------------------------------------------------------------
 # Visualisation helpers
 # ---------------------------------------------------------------------------
+def recon_rows_html(tokens, per_token, resolve_fn, threshold=0.112):
+    """
+    Vertical list of tokens colored by reconstruction error relative to threshold.
+    Green = below threshold, yellow = approaching threshold, red = above threshold.
+    """
+    valid = [(i, t) for i, t in enumerate(tokens) if t != 0]
+    if not valid:
+        return ""
+
+    rows = ""
+    for (i, t) in valid:
+        s = float(per_token[i])
+        if s >= threshold:
+            bg    = "rgba(239,68,68,0.12)"
+            color = "#ef4444"
+        elif s >= threshold * 0.5:
+            bg    = "rgba(245,158,11,0.08)"
+            color = "#f59e0b"
+        else:
+            bg    = "rgba(34,197,94,0.05)"
+            color = "#22c55e"
+
+        rows += (
+            f'<div style="display:flex;justify-content:space-between;gap:8px;padding:3px 6px;'
+            f'border-bottom:1px solid #0f172a;background:{bg};">'
+            f'<span style="color:#334155;font-size:9px;min-width:18px;">{i+1}.</span>'
+            f'<span style="color:#94a3b8;font-size:9px;font-family:Space Mono,monospace;flex:1;">'
+            f'{resolve_fn(t)}</span>'
+            f'<span style="font-size:9px;font-family:Space Mono,monospace;color:{color};">'
+            f'{s:.4f}</span>'
+            f'</div>'
+        )
+    return rows
+    
+    
 def score_gauge_svg(score, threshold, color):
     import math
     pct   = min(score / max(threshold * 2, 1e-6), 1.0)
@@ -291,40 +339,79 @@ def timeline_figure(scores, threshold, color):
     return fig
 
 
-def heatmap_figure(sequence, per_token_scores, vocab_inv, label_map=None):
-    n      = len(sequence)
+def heatmap_figure(sequence, per_token_scores, vocab_inv, label_map=None, template_strings=None):
+    heatmap_figure._template_strings = template_strings or {}
+    n      = min(len(sequence), 20)
     scores = per_token_scores[:n]
-    if label_map:
-        labels = [label_map.get(str(t), TEMPLATE_LABELS.get(str(t), (str(t), ""))[0]) for t in sequence]
-    else:
-        labels = [TEMPLATE_LABELS.get(t, (str(t), ""))[0] for t in sequence]
 
+    def _resolve_label(t):
+        if t in TEMPLATE_LABELS:
+            return TEMPLATE_LABELS[t][0]
+        key_single = f"template_{t}"
+        key_double = f"template__{t}"
+        ts = heatmap_figure._template_strings
+        raw = ts.get(key_single) or ts.get(key_double)
+        if raw:
+            raw = (raw.replace("<<NUM>>", "#")
+                      .replace("<<BLK>>", "<block>")
+                      .replace("<<IP>>",  "<ip>")
+                      .replace("<*>",     "..."))
+            return (raw[:12] + "...") if len(raw) > 12 else raw
+        if label_map:
+            lbl = label_map.get(str(t), "")
+            if lbl and lbl not in ("Normal", "Anomaly", "0", "1"):
+                return lbl
+        return "?"
+
+    labels = [_resolve_label(t) for t in sequence[:n]]
+
+    n_cols = 4
+    n_rows = 5
     vmax = max(float(scores.max()), 1e-6)
     norm = mcolors.Normalize(vmin=0, vmax=vmax)
     cmap = plt.cm.RdYlGn_r
 
-    fig, ax = plt.subplots(figsize=(max(6, n * 0.9), 2.2))
+    fig, ax = plt.subplots(figsize=(4, 2.5))
     fig.patch.set_facecolor("#0f172a")
     ax.set_facecolor("#0f172a")
 
-    for i, (label, s) in enumerate(zip(labels, scores)):
-        color = cmap(norm(float(s)))
-        ax.add_patch(plt.Rectangle([i, 0], 0.9, 0.8, color=color, linewidth=0))
-        ax.text(i + 0.45, 0.4, str(label)[:12], ha="center", va="center",
-                fontsize=7, color="white", fontweight="bold", rotation=45)
-        ax.text(i + 0.45, -0.15, f"{float(s):.3f}", ha="center", va="top",
-                fontsize=7, color="#94a3b8")
+    for i in range(n):
+        row = i // n_cols
+        col = i %  n_cols
+        s   = float(scores[i])
+        color = cmap(norm(s))
 
-    ax.set_xlim(0, n)
-    ax.set_ylim(-0.35, 1.1)
+        # Square block
+        ax.add_patch(plt.Rectangle(
+            [col, n_rows - row - 1], 0.92, 0.92,
+            color=color, linewidth=0
+        ))
+
+        # Label line 1 — truncated token name
+        ax.text(col + 0.46, n_rows - row - 1 + 0.65,
+                str(labels[i])[:10],
+                ha="center", va="center",
+                fontsize=5.5, color="white", fontweight="bold")
+
+        # Label line 2 — MSE score
+        ax.text(col + 0.46, n_rows - row - 1 + 0.28,
+                f"{s:.3f}",
+                ha="center", va="center",
+                fontsize=5, color="#cbd5e1")
+
+    ax.set_xlim(0, n_cols)
+    ax.set_ylim(0, n_rows)
     ax.axis("off")
+
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
-    cbar = fig.colorbar(sm, ax=ax, orientation="horizontal", fraction=0.04, pad=0.05)
-    cbar.ax.tick_params(colors="#94a3b8", labelsize=8)
-    cbar.set_label("Reconstruction Error", color="#94a3b8", fontsize=9)
-    fig.tight_layout()
+    cbar = fig.colorbar(sm, ax=ax, orientation="horizontal", fraction=0.04, pad=0.04)
+    cbar.ax.tick_params(colors="#94a3b8", labelsize=7)
+    cbar.set_label("Reconstruction Error", color="#94a3b8", fontsize=8)
+
+    fig.tight_layout(pad=0.3)
     return fig
+    
     
 def embedding_comparison_figure(input_emb, recon_emb, worst_idx):
     """
@@ -361,6 +448,170 @@ def embedding_comparison_figure(input_emb, recon_emb, worst_idx):
     )
     fig.tight_layout(pad=0.5)
     return fig
+    
+
+def normal_reconstruction_figure(input_emb, recon_emb):
+    """
+    Input vs reconstructed embedding for the last normal sequence.
+    Should match closely — proves the decoder works correctly for normal data.
+    """
+    dims = np.arange(len(input_emb))
+    diff = np.abs(input_emb - recon_emb)
+    top_dims = set(np.argsort(diff)[-5:].tolist())
+
+    fig, ax = plt.subplots(figsize=(4, 2.5))
+    fig.patch.set_facecolor("#0f172a")
+    ax.set_facecolor("#0f172a")
+
+    width = 0.42
+    ax.bar(dims - width/2, input_emb, width, label="Input embedding",
+           color="#22c55e", alpha=0.75)
+    ax.bar(dims + width/2, recon_emb, width, label="Reconstructed",
+           color="#ef4444", alpha=0.75)
+
+    for d in top_dims:
+        ax.axvspan(d - 0.5, d + 0.5, color="#f59e0b", alpha=0.05, zorder=0)
+
+    mse = float(np.mean(diff ** 2))
+    ax.set_xlabel("Embedding Dimension", color="#64748b", fontsize=8)
+    ax.set_ylabel("Value", color="#64748b", fontsize=8)
+    ax.tick_params(colors="#475569", labelsize=7)
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#1e293b")
+    ax.legend(fontsize=7, facecolor="#0f172a", labelcolor="#94a3b8",
+              framealpha=0.4, loc="upper right")
+    ax.set_title(
+        f"Last Normal Sequence — Input vs Reconstructed (should match closely) · MSE={mse:.5f}",
+        color="#94a3b8", fontsize=7, pad=4,
+    )
+    fig.tight_layout(pad=0.5)
+    return fig
+    
+    
+def feature_interpretation_html(z_scores, threshold=2.0,
+                                 dim_correlations=None,
+                                 template_strings=None):
+    dim_correlations = dim_correlations or {}
+    template_strings = template_strings or {}
+
+    def _get_template_str(tmpl_key):
+        # Try single underscore first, then double underscore
+        raw = template_strings.get(tmpl_key) or template_strings.get(
+            tmpl_key.replace("template_", "template__", 1)
+        )
+        if not raw:
+            return None
+        return (raw.replace("<<NUM>>", "#")
+                   .replace("<<BLK>>", "<block>")
+                   .replace("<<IP>>",  "<ip>")
+                   .replace("<*>",     "..."))
+
+    # Find all dims that crossed threshold
+    spiking_dims = [i for i, z in enumerate(z_scores) if z > threshold]
+
+    if not spiking_dims:
+        return (
+            '<div style="font-family:Space Mono,monospace;font-size:10px;'
+            'color:#334155;padding:6px;">No dimensions crossed 2σ.</div>'
+        )
+
+    # Sort by z-score descending
+    spiking_dims.sort(key=lambda d: float(z_scores[d]), reverse=True)
+
+    html = '<div style="margin-top:6px;">'
+
+    for d in spiking_dims:
+        z_val     = float(z_scores[d])
+        corr_list = dim_correlations.get(str(d), [])
+
+        if corr_list:
+            top      = corr_list[0]
+            tmpl_key = top.get("template", "")
+            corr_val = top.get("correlation", 0.0)
+            sign     = "+" if corr_val >= 0 else ""
+            tmpl_str = _get_template_str(tmpl_key) or tmpl_key
+            weak_note = (
+                ' &nbsp;<span style="color:#475569;font-size:9px;">'
+                '(weak correlation)</span>'
+                if abs(corr_val) < 0.3 else ""
+            )
+            corr_line  = f"Top correlation: {tmpl_key} (r={sign}{corr_val:.3f}){weak_note}"
+            string_line = tmpl_str
+        else:
+            corr_line   = "No correlation data available"
+            string_line = ""
+
+        html += f"""
+        <div style="background:rgba(15,23,42,0.7);border:1px solid #1e293b;
+                    border-left:3px solid #ef4444;border-radius:6px;
+                    padding:7px 10px;margin:4px 0;
+                    font-family:'Space Mono',monospace;">
+          <div style="color:#fca5a5;font-size:10px;font-weight:700;">
+            Dim {d} spiked ({z_val:.2f}σ)
+          </div>
+          <div style="color:#f59e0b;font-size:9px;margin-top:3px;">
+            {corr_line}
+          </div>
+          <div style="color:#64748b;font-size:9px;margin-top:2px;
+                      font-style:italic;word-break:break-word;">
+            {string_line}
+          </div>
+        </div>"""
+
+    html += "</div>"
+    return html
+    
+    
+def panel_latent_figure(latent_vec):
+    """32-dim raw latent vector bar chart."""
+    dims = np.arange(len(latent_vec))
+    fig, ax = plt.subplots(figsize=(4, 2.5))
+    fig.patch.set_facecolor("#0f172a")
+    ax.set_facecolor("#0f172a")
+    colors = ["#ef4444" if v < 0 else "#38bdf8" for v in latent_vec]
+    ax.bar(dims, latent_vec, color=colors, alpha=0.8, width=0.8)
+    ax.axhline(y=0, color="#334155", linewidth=0.8)
+    ax.set_xlabel("Latent Dimension", color="#64748b", fontsize=8)
+    ax.set_ylabel("Value", color="#64748b", fontsize=8)
+    ax.tick_params(colors="#475569", labelsize=7)
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#1e293b")
+    ax.set_title("Encoder Output — Latent Vector",
+                 color="#94a3b8", fontsize=8, pad=4)
+    fig.tight_layout(pad=0.5)
+    return fig
+    
+    
+def render_verdict_banner(is_anomaly, score, ground_truth):
+    gt_label  = "Anomaly" if ground_truth == 1 else "Normal" if ground_truth == 0 else "Unknown"
+    gt_color  = "#ef4444" if ground_truth == 1 else "#22c55e"
+    pred_cls  = "verdict-anomaly" if is_anomaly else "verdict-normal"
+    pred_text = "🚨 ANOMALOUS" if is_anomaly else "✅ NORMAL"
+    correct   = (is_anomaly == (ground_truth == 1))
+    match_str = "✓ Correct" if correct else "✗ Wrong"
+    match_col = "#22c55e" if correct else "#ef4444"
+    vc1, vc2, vc3 = st.columns(3)
+    vc1.markdown(
+        f'<div class="{pred_cls}">Model: {pred_text}<br>'
+        f'<span style="font-size:13px;letter-spacing:1px;">MSE={score:.4f}</span></div>',
+        unsafe_allow_html=True,
+    )
+    vc2.markdown(
+        f'<div style="background:#0f172a;border:2px solid {gt_color};'
+        f'border-radius:12px;padding:14px;text-align:center;'
+        f'font-size:18px;font-weight:800;color:{gt_color};'
+        f'letter-spacing:2px;font-family:Space Mono,monospace;">'
+        f'Truth: {gt_label}</div>',
+        unsafe_allow_html=True,
+    )
+    vc3.markdown(
+        f'<div style="background:#0f172a;border:2px solid {match_col};'
+        f'border-radius:12px;padding:14px;text-align:center;'
+        f'font-size:18px;font-weight:800;color:{match_col};'
+        f'letter-spacing:2px;font-family:Space Mono,monospace;">'
+        f'{match_str}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -517,6 +768,10 @@ for key, default in [
     ("alerts", deque(maxlen=20)),
     ("total_sequences", 0),
     ("total_anomalies", 0),
+    ("tp", 0),
+    ("tn", 0),
+    ("fp", 0),
+    ("fn", 0),
     ("latent_history", []),
     ("last_normal_latent", None),
     ("builder_sequence", []),
@@ -524,6 +779,11 @@ for key, default in [
     ("custom_result", None),
     ("last_comparison", None),
     ("comparison_history", []),
+    ("last_normal_emb",   None),
+    ("last_normal_recon", None),
+    ("normal_history", []),
+    ("fp_history", []),
+    ("fn_history", []),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -617,6 +877,11 @@ if ds_cfg["classifier"] and Path(ds_cfg["classifier"]).exists():
         st.sidebar.warning(f"Classifier not loaded: {e}")
 
 label_map = load_label_map(ds_cfg["label_map"])
+ts_path_global = ds_cfg["vocab_file"].replace("vocab.json", "template_strings.json")
+template_strings_global = json.load(open(ts_path_global)) if Path(ts_path_global).exists() else {}
+
+dim_corr_path    = ds_cfg["vocab_file"].replace("vocab.json", "dim_template_correlations.json")
+dim_correlations = json.load(open(dim_corr_path)) if Path(dim_corr_path).exists() else {}
 
 test_X, test_y = None, None
 if Path(ds_cfg["test_X"]).exists():
@@ -657,13 +922,12 @@ st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
 # Stats row
 # ---------------------------------------------------------------------------
 s1, s2, s3, s4 = st.columns(4)
-anomaly_rate = (st.session_state.total_anomalies / max(st.session_state.total_sequences, 1)) * 100
 
 for col, val, lbl, color in [
-    (s1, st.session_state.total_sequences, "Sequences Analyzed", ds_color),
-    (s2, st.session_state.total_anomalies, "Anomalies Detected",  "#ef4444"),
-    (s3, f"{anomaly_rate:.1f}%",           "Anomaly Rate",        "#f59e0b"),
-    (s4, f"{threshold:.3f}",               "Threshold",           "#64748b"),
+    (s1, st.session_state.tp, "True Positive",  "#22c55e"),
+    (s2, st.session_state.tn, "True Negative",  "#38bdf8"),
+    (s3, st.session_state.fp, "False Positive", "#f59e0b"),
+    (s4, st.session_state.fn, "False Negative", "#ef4444"),
 ]:
     col.markdown(f"""
     <div class="stat-box">
@@ -689,72 +953,248 @@ if st.session_state.mode == "LIVE STREAM":
         st.session_state.stream_running = False
 
     st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
+        
+    # --- Normal history (last 5, rendered above anomalies) ---
+    if st.session_state.normal_history:
+        st.markdown(
+            '<div style="background:linear-gradient(135deg,#052e16,#0a3622);'
+            'border:2px solid #22c55e;border-radius:12px;padding:14px;'
+            'text-align:center;font-size:18px;font-weight:800;color:#22c55e;'
+            'letter-spacing:4px;font-family:Space Mono,monospace;margin:16px 0;">'
+            '✅ NORMAL SEQUENCES</div>',
+            unsafe_allow_html=True,
+        )
+        for entry in st.session_state.normal_history[-5:]:
+            render_verdict_banner(
+                entry.get("is_anomaly", False),
+                entry["score"],
+                entry.get("ground_truth", -1),
+            )
+            col_a, col_b = st.columns(2)
+            
+            print(f"DEBUG latent in entry: {'latent' in entry}, val: {entry.get('latent', 'MISSING')}", flush=True)
 
-    # Current sequence verdict + heatmap
-    st.markdown('<div class="section-label">Current Window — Per-Token Error</div>', unsafe_allow_html=True)
-    verdict_placeholder = st.empty()
-    heatmap_placeholder = st.empty()
+            fig_z = panel_latent_figure(
+                entry["latent"] if "latent" in entry else np.zeros(32)
+            )
+            col_a.pyplot(fig_z, use_container_width=True)
+            plt.close(fig_z)
+            
+            # Input sequence below latent values
+            def _resolve_token(t):
+                key_single = f"template_{t}"
+                key_double = f"template__{t}"
+                raw = template_strings_global.get(key_single) or template_strings_global.get(key_double)
+                if raw:
+                    raw = (raw.replace("<<NUM>>", "#")
+                              .replace("<<BLK>>", "<block>")
+                              .replace("<<IP>>",  "<ip>")
+                              .replace("<*>",     "..."))
+                    return (raw[:35] + "...") if len(raw) > 35 else raw
+                if str(t) in TEMPLATE_LABELS:
+                    return TEMPLATE_LABELS[str(t)][0]
+                lbl = label_map.get(str(t), "")
+                if lbl and lbl not in ("Normal", "Anomaly", "0", "1"):
+                    return lbl
+                return f"token_{t}"
 
-    # Alert feed
-    st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
-    st.markdown('<div class="section-label">Alert Feed</div>', unsafe_allow_html=True)
-    alerts_placeholder = st.empty()
-
-    # Latent deviation charts (persistent)
-    st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
-    st.markdown('<div class="section-label">Latent Space Deviation — Anomalies</div>', unsafe_allow_html=True)
-    latent_placeholder = st.empty()
-
-    def render_alerts():
-        if not st.session_state.alerts:
-            alerts_placeholder.markdown(
-                '<p style="color:#1e293b;font-family:Space Mono,monospace;font-size:11px;">Waiting for stream...</p>',
+            seq_rows = "".join(
+                f'<div style="display:flex;gap:8px;padding:2px 6px;'
+                f'border-bottom:1px solid #0f172a;">'
+                f'<span style="color:#334155;font-size:9px;min-width:18px;">{i+1}.</span>'
+                f'<span style="color:#94a3b8;font-size:9px;font-family:Space Mono,monospace;">'
+                f'{_resolve_token(t)}</span>'
+                f'</div>'
+                for i, t in enumerate(entry["tokens"])
+                if t != 0
+            )
+            col_a.markdown(
+                f'<div style="margin-top:8px;background:#0f172a;border:1px solid #1e293b;'
+                f'border-radius:6px;padding:4px;max-height:360px;overflow-y:scroll;">'
+                f'<div style="font-size:9px;color:#334155;padding:3px 6px;'
+                f'letter-spacing:1px;text-transform:uppercase;">Input Sequence</div>'
+                f'{seq_rows}</div>',
                 unsafe_allow_html=True,
             )
-            return
-        html = ""
-        for alert in reversed(list(st.session_state.alerts)):
-            cls  = "alert-anomaly" if alert["anomaly"] else "alert-normal"
-            icon = "🚨" if alert["anomaly"] else "✅"
-            cat  = f" · <b>{alert['category']}</b>" if alert.get("category") else ""
-            html += f'<div class="alert-item {cls}">{icon} #{alert["idx"]} &nbsp; MSE={alert["score"]:.4f}{cat}</div>'
-        alerts_placeholder.markdown(html, unsafe_allow_html=True)
 
-    render_alerts()
-    
-    # --- Render latent comparison persistently ---
+            fig_emb = embedding_comparison_figure(
+                entry["input_emb"], entry["recon_emb"],
+                entry.get("worst_idx", 0),
+            )
+            col_b.pyplot(fig_emb, use_container_width=True)
+            plt.close(fig_emb)
+            
+            col_b.markdown(
+                f'<div style="margin-top:8px;background:#0f172a;border:1px solid #1e293b;'
+                f'border-radius:6px;padding:4px;height:360px;overflow-y:scroll;">'
+                f'<div style="font-size:9px;color:#334155;padding:3px 6px;'
+                f'letter-spacing:1px;text-transform:uppercase;">Reconstruction Error by Event</div>'
+                f'{recon_rows_html(entry["tokens"], entry["per_token"], _resolve_token, threshold)}</div>',
+                unsafe_allow_html=True,
+            )
+
+    # --- Anomaly history (last 5, rendered below normals) ---
+    if st.session_state.latent_history:
+        st.markdown(
+            '<div style="background:linear-gradient(135deg,#2d0a0a,#3b0f0f);'
+            'border:2px solid #ef4444;border-radius:12px;padding:14px;'
+            'text-align:center;font-size:18px;font-weight:800;color:#ef4444;'
+            'letter-spacing:4px;font-family:Space Mono,monospace;margin:16px 0;">'
+            '🚨 ANOMALOUS SEQUENCES</div>',
+            unsafe_allow_html=True,
+        )
+
     for i, (entry, cmp) in enumerate(zip(
         st.session_state.latent_history[-5:],
         st.session_state.comparison_history[-5:],
     )):
+        render_verdict_banner(
+            cmp.get("is_anomaly", True),
+            cmp["score"],
+            cmp.get("ground_truth", -1),
+        )
         col_a, col_b = st.columns(2)
 
-        z_scores = entry["z_scores"]
-        fig_z, ax_z = plt.subplots(figsize=(4, 2.5))
-        fig_z.patch.set_facecolor("#0f172a")
-        ax_z.set_facecolor("#0f172a")
-        colors = ["#ef4444" if z > 2.0 else "#f59e0b" if z > 1.0 else "#22c55e" for z in z_scores]
-        ax_z.bar(range(len(z_scores)), z_scores, color=colors, width=0.8)
-        ax_z.axhline(y=2.0, color="#ef4444", linestyle="--", linewidth=0.8, alpha=0.7)
-        ax_z.set_xlabel("Latent Dimension", color="#64748b", fontsize=8)
-        ax_z.set_ylabel("Std Devs from Mean", color="#64748b", fontsize=8)
-        ax_z.tick_params(colors="#475569", labelsize=7)
-        for spine in ax_z.spines.values():
-            spine.set_edgecolor("#1e293b")
-        top3 = np.argsort(z_scores)[-3:][::-1]
-        ax_z.set_title(
-            f"Anomaly #{entry['idx']} · Dims: {', '.join(str(d) for d in top3)}",
-            color="#94a3b8", fontsize=8, pad=4,
+        fig_z = panel_latent_figure(
+            entry["latent"] if "latent" in entry else np.zeros(32)
         )
-        fig_z.tight_layout(pad=0.5)
         col_a.pyplot(fig_z, use_container_width=True)
         plt.close(fig_z)
+
+        seq_rows = "".join(
+            f'<div style="display:flex;gap:8px;padding:2px 6px;'
+            f'border-bottom:1px solid #0f172a;">'
+            f'<span style="color:#334155;font-size:9px;min-width:18px;">{i+1}.</span>'
+            f'<span style="color:#94a3b8;font-size:9px;font-family:Space Mono,monospace;">'
+            f'{_resolve_token(t)}</span>'
+            f'</div>'
+            for i, t in enumerate(cmp["tokens"])
+            if t != 0
+        )
+        col_a.markdown(
+            f'<div style="margin-top:8px;background:#0f172a;border:1px solid #1e293b;'
+            f'border-radius:6px;padding:4px;max-height:360px;overflow-y:scroll;">'
+            f'<div style="font-size:9px;color:#334155;padding:3px 6px;'
+            f'letter-spacing:1px;text-transform:uppercase;">Input Sequence</div>'
+            f'{seq_rows}</div>',
+            unsafe_allow_html=True,
+        )
 
         fig_cmp = embedding_comparison_figure(
             cmp["input_emb"], cmp["recon_emb"], cmp["worst_idx"]
         )
         col_b.pyplot(fig_cmp, use_container_width=True)
         plt.close(fig_cmp)
+        
+        #fig_hm = heatmap_figure(cmp["tokens"], cmp["per_token"], {}, label_map)
+        col_b.markdown(
+            f'<div style="margin-top:8px;background:#0f172a;border:1px solid #1e293b;'
+            f'border-radius:6px;padding:4px;height:360px;overflow-y:scroll;">'
+            f'<div style="font-size:9px;color:#334155;padding:3px 6px;'
+            f'letter-spacing:1px;text-transform:uppercase;">Reconstruction Error by Event</div>'
+            f'{recon_rows_html(cmp["tokens"], cmp["per_token"], _resolve_token, threshold)}</div>',
+            unsafe_allow_html=True,
+        )
+        
+    # --- Misclassified sequences (permanent, never overwritten) ---
+    if st.session_state.fp_history or st.session_state.fn_history:
+        st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
+        st.markdown(
+            '<div style="background:linear-gradient(135deg,#2d1a00,#3b2500);'
+            'border:2px solid #f59e0b;border-radius:12px;padding:14px;'
+            'text-align:center;font-size:18px;font-weight:800;color:#f59e0b;'
+            'letter-spacing:4px;font-family:Space Mono,monospace;margin:16px 0;">'
+            '⚠️ MISCLASSIFIED SEQUENCES</div>',
+            unsafe_allow_html=True,
+        )
+
+        for entry in st.session_state.fp_history:
+            st.markdown(
+                f'<div style="font-family:Space Mono,monospace;font-size:10px;'
+                f'color:#f59e0b;padding:4px 8px;margin-bottom:4px;">'
+                f'⚠️ FALSE POSITIVE #{entry["idx"]} — model said ANOMALOUS, truth was NORMAL '
+                f'(MSE={entry["score"]:.4f})</div>',
+                unsafe_allow_html=True,
+            )
+            col_a, col_b = st.columns(2)
+            fig_z = panel_latent_figure(entry["latent"])
+            col_a.pyplot(fig_z, use_container_width=True)
+            plt.close(fig_z)
+            seq_rows = "".join(
+                f'<div style="display:flex;gap:8px;padding:2px 6px;'
+                f'border-bottom:1px solid #0f172a;">'
+                f'<span style="color:#334155;font-size:9px;min-width:18px;">{i+1}.</span>'
+                f'<span style="color:#94a3b8;font-size:9px;font-family:Space Mono,monospace;">'
+                f'{_resolve_token(t)}</span>'
+                f'</div>'
+                for i, t in enumerate(entry["tokens"]) if t != 0
+            )
+            col_a.markdown(
+                f'<div style="margin-top:8px;background:#0f172a;border:1px solid #1e293b;'
+                f'border-radius:6px;padding:4px;max-height:360px;overflow-y:scroll;">'
+                f'<div style="font-size:9px;color:#334155;padding:3px 6px;'
+                f'letter-spacing:1px;text-transform:uppercase;">Input Sequence</div>'
+                f'{seq_rows}</div>',
+                unsafe_allow_html=True,
+            )
+            fig_emb = embedding_comparison_figure(
+                entry["input_emb"], entry["recon_emb"], entry["worst_idx"]
+            )
+            col_b.pyplot(fig_emb, use_container_width=True)
+            plt.close(fig_emb)
+
+            col_b.markdown(
+                f'<div style="margin-top:8px;background:#0f172a;border:1px solid #1e293b;'
+                f'border-radius:6px;padding:4px;height:360px;overflow-y:scroll;">'
+                f'<div style="font-size:9px;color:#334155;padding:3px 6px;'
+                f'letter-spacing:1px;text-transform:uppercase;">Reconstruction Error by Event</div>'
+                f'{recon_rows_html(entry["tokens"], entry["per_token"], _resolve_token, threshold)}</div>',
+                unsafe_allow_html=True,
+            )
+
+        for entry in st.session_state.fn_history:
+            st.markdown(
+                f'<div style="font-family:Space Mono,monospace;font-size:10px;'
+                f'color:#ef4444;padding:4px 8px;margin-bottom:4px;">'
+                f'🚨 FALSE NEGATIVE #{entry["idx"]} — model said NORMAL, truth was ANOMALOUS '
+                f'(MSE={entry["score"]:.4f})</div>',
+                unsafe_allow_html=True,
+            )
+            col_a, col_b = st.columns(2)
+            fig_z = panel_latent_figure(entry["latent"])
+            col_a.pyplot(fig_z, use_container_width=True)
+            plt.close(fig_z)
+            seq_rows = "".join(
+                f'<div style="display:flex;gap:8px;padding:2px 6px;'
+                f'border-bottom:1px solid #0f172a;">'
+                f'<span style="color:#334155;font-size:9px;min-width:18px;">{i+1}.</span>'
+                f'<span style="color:#94a3b8;font-size:9px;font-family:Space Mono,monospace;">'
+                f'{_resolve_token(t)}</span>'
+                f'</div>'
+                for i, t in enumerate(entry["tokens"]) if t != 0
+            )
+            col_a.markdown(
+                f'<div style="margin-top:8px;background:#0f172a;border:1px solid #1e293b;'
+                f'border-radius:6px;padding:4px;max-height:360px;overflow-y:scroll;">'
+                f'<div style="font-size:9px;color:#334155;padding:3px 6px;'
+                f'letter-spacing:1px;text-transform:uppercase;">Input Sequence</div>'
+                f'{seq_rows}</div>',
+                unsafe_allow_html=True,
+            )
+            fig_emb = embedding_comparison_figure(
+                entry["input_emb"], entry["recon_emb"], entry["worst_idx"]
+            )
+            col_b.pyplot(fig_emb, use_container_width=True)
+            plt.close(fig_emb)
+
+            col_b.markdown(
+                f'<div style="margin-top:8px;background:#0f172a;border:1px solid #1e293b;'
+                f'border-radius:6px;padding:4px;height:360px;overflow-y:scroll;">'
+                f'<div style="font-size:9px;color:#334155;padding:3px 6px;'
+                f'letter-spacing:1px;text-transform:uppercase;">Reconstruction Error by Event</div>'
+                f'{recon_rows_html(entry["tokens"], entry["per_token"], _resolve_token, threshold)}</div>',
+                unsafe_allow_html=True,
+            )
     
     # --- Render latent history persistently ---
     # Use a real st.container() (not st.empty) so charts stack and never flicker.
@@ -762,52 +1202,125 @@ if st.session_state.mode == "LIVE STREAM":
 
     # --- Stream loop ---
     if st.session_state.stream_running and model_loaded and test_X is not None:
-        idx = st.session_state.stream_idx % len(test_X)
+        # Weighted sampling — 50% chance of picking an anomaly
+        if test_y is not None and np.random.random() < 0.5:
+            anomaly_indices = np.where(test_y == 1)[0]
+            idx = int(np.random.choice(anomaly_indices))
+        else:
+            normal_indices = np.where(test_y == 0)[0]
+            idx = int(np.random.choice(normal_indices))
         x_np = test_X[idx:idx+1]
         x    = torch.tensor(x_np, dtype=torch.long)
 
         score, per_token, latent, target_emb, recon = _score_sequence(model, x)
-        print(f"DEBUG score={score:.6f} threshold={threshold}", flush=True)
 
         is_anomaly = score >= threshold
         st.session_state.scores_history.append(score)
         st.session_state.total_sequences += 1
+        
+        ground_truth = int(test_y[idx]) if test_y is not None else -1
+        if ground_truth != -1:
+            if is_anomaly and ground_truth == 1:
+                st.session_state.tp += 1
+            elif not is_anomaly and ground_truth == 0:
+                st.session_state.tn += 1
+            elif is_anomaly and ground_truth == 0:
+                st.session_state.fp += 1
+                st.session_state.fp_history.append({
+                    "idx":          st.session_state.total_sequences,
+                    "score":        score,
+                    "tokens":       x_np[0].tolist(),
+                    "per_token":    per_token.copy(),
+                    "latent":       latent.copy(),
+                    "input_emb":    target_emb[0, int(per_token.argmax())].numpy().copy(),
+                    "recon_emb":    recon[0, int(per_token.argmax())].numpy().copy(),
+                    "worst_idx":    int(per_token.argmax()),
+                    "ground_truth": ground_truth,
+                    "is_anomaly":   is_anomaly,
+                })
+            elif not is_anomaly and ground_truth == 1:
+                st.session_state.fn += 1
+                st.session_state.fn_history.append({
+                    "idx":          st.session_state.total_sequences,
+                    "score":        score,
+                    "tokens":       x_np[0].tolist(),
+                    "per_token":    per_token.copy(),
+                    "latent":       latent.copy(),
+                    "input_emb":    target_emb[0, int(per_token.argmax())].numpy().copy(),
+                    "recon_emb":    recon[0, int(per_token.argmax())].numpy().copy(),
+                    "worst_idx":    int(per_token.argmax()),
+                    "ground_truth": ground_truth,
+                    "is_anomaly":   is_anomaly,
+                })
 
         category = None
         if not is_anomaly:
             st.session_state.last_normal_latent = latent.copy()
-            
+            non_pad = (x_np[0] != 0).nonzero()[0]
+            normal_best_idx = int(non_pad[0]) if len(non_pad) > 0 else 0
+            st.session_state.last_normal_emb   = target_emb[0, normal_best_idx].numpy().copy()
+            st.session_state.last_normal_recon = recon[0, normal_best_idx].numpy().copy()
+
+            normal_worst_idx = int(per_token.argmax())
+            normal_token_id  = int(x_np[0, normal_worst_idx])
+            st.session_state.normal_history.append({
+                "idx":            st.session_state.total_sequences,
+                "score":          score,
+                "z_scores":       np.abs((latent - np.zeros_like(latent))),
+                "worst_token_id": normal_token_id,
+                "input_emb":      target_emb[0, normal_worst_idx].numpy().copy(),
+                "recon_emb":      recon[0, normal_worst_idx].numpy().copy(),
+                "tokens":         x_np[0].tolist(),
+                "per_token":      per_token.copy(),
+                "latent":         latent.copy(),
+                "is_anomaly":     is_anomaly,
+                "ground_truth":   int(test_y[idx]) if test_y is not None else -1,
+                "worst_idx":      normal_worst_idx,        # ← add this
+            })
+            latent_mean_path = ds_cfg["vocab_file"].replace("vocab.json", "latent_mean.npy")
+            latent_std_path  = ds_cfg["vocab_file"].replace("vocab.json", "latent_std.npy")
+            if Path(latent_mean_path).exists() and Path(latent_std_path).exists():
+                lat_mean = np.load(latent_mean_path)
+                lat_std  = np.load(latent_std_path).clip(min=1e-6)
+                st.session_state.normal_history[-1]["z_scores"] = np.abs((latent - lat_mean) / lat_std)
+            st.session_state.normal_history = st.session_state.normal_history[-5:]
+
         if is_anomaly:
             st.session_state.total_anomalies += 1
             if clf_loaded:
                 category = classify_anomaly(latent, clf, idx_to_class, label_map_clf)
-                
-            # Compute z-scores and store for persistent rendering
+
             latent_mean_path = ds_cfg["vocab_file"].replace("vocab.json", "latent_mean.npy")
             latent_std_path  = ds_cfg["vocab_file"].replace("vocab.json", "latent_std.npy")
             if Path(latent_mean_path).exists() and Path(latent_std_path).exists():
                 lat_mean = np.load(latent_mean_path)
                 lat_std  = np.load(latent_std_path).clip(min=1e-6)
                 z_scores = np.abs((latent - lat_mean) / lat_std)
+                worst_idx = int(per_token.argmax())
+                worst_token_id = int(x_np[0, worst_idx])
                 st.session_state.latent_history.append({
-                    "idx":     st.session_state.total_sequences,
-                    "score":   score,
-                    "z_scores": z_scores,
+                    "idx":            st.session_state.total_sequences,
+                    "score":          score,
+                    "z_scores":       z_scores,
+                    "worst_token_id": worst_token_id,
+                    "latent":         latent.copy(),
                 })
-                # Keep only last 10 anomalies to avoid unbounded growth
                 st.session_state.latent_history = st.session_state.latent_history[-10:]
-                
-            # Store for persistent rendering
+
             if st.session_state.last_normal_latent is not None:
                 worst_idx = int(per_token.argmax())
                 st.session_state.comparison_history.append({
-                    "normal":      st.session_state.last_normal_latent.copy(),
-                    "anomaly":     latent.copy(),
-                    "idx":         st.session_state.total_sequences,
-                    "score":       score,
-                    "worst_idx":   worst_idx,
-                    "input_emb":   target_emb[0, worst_idx].numpy().copy(),
-                    "recon_emb":   recon[0, worst_idx].numpy().copy(),
+                    "normal":       st.session_state.last_normal_latent.copy(),
+                    "anomaly":      latent.copy(),
+                    "idx":          st.session_state.total_sequences,
+                    "score":        score,
+                    "worst_idx":    worst_idx,
+                    "input_emb":    target_emb[0, worst_idx].numpy().copy(),
+                    "recon_emb":    recon[0, worst_idx].numpy().copy(),
+                    "tokens":       x_np[0].tolist(),
+                    "per_token":    per_token.copy(),
+                    "is_anomaly":   is_anomaly,
+                    "ground_truth": int(test_y[idx]) if test_y is not None else -1,
                 })
                 st.session_state.comparison_history = st.session_state.comparison_history[-10:]
 
@@ -818,29 +1331,11 @@ if st.session_state.mode == "LIVE STREAM":
             "category": category,
         })
 
+        fig_lat = panel_latent_figure(latent)
+        #latent_placeholder.pyplot(fig_lat, use_container_width=True)
+        plt.close(fig_lat)
+
         st.session_state.stream_idx += 1
-        
-        # Verdict + heatmap together in one placeholder (single rerun-stable slot)
-        with verdict_placeholder.container():
-            if is_anomaly:
-                st.markdown('<div class="verdict-anomaly">🚨 ANOMALOUS</div>', unsafe_allow_html=True)
-                if category:
-                    st.markdown(
-                        f'<div style="text-align:center;margin-top:8px;">'
-                        f'<span class="category-badge">⚠️ {category}</span></div>',
-                        unsafe_allow_html=True,
-                    )
-            else:
-                st.markdown('<div class="verdict-normal">✅ NORMAL</div>', unsafe_allow_html=True)
-
-        # Render heatmap
-        seq_tokens = x_np[0].tolist()
-        fig2 = heatmap_figure(seq_tokens, per_token, {}, label_map)
-        heatmap_placeholder.pyplot(fig2, use_container_width=True)
-        plt.close(fig2)
-
-        render_alerts()
-
         time.sleep(1.0 / stream_speed)
         st.rerun()
 
